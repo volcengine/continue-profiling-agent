@@ -46,13 +46,13 @@ sudo pahole --btf_encode_detached=/etc/cpa/vmlinux.btf \
 GitHub Release 发布后，可以直接安装 Linux x86_64 portable 包：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
 ```
 
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
 ```
 
 安装脚本会从 GitHub Releases 下载 `cpa_portable-linux-x86_64`，然后调用
@@ -112,7 +112,7 @@ btf_path: /etc/cpa/vmlinux.btf
 `/var/log/cpa` 下的 profiling 数据：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
 ```
 
 如果使用本地 checkout，也可以执行：

@@ -170,7 +170,7 @@ sampling, queueing, symbol formatting, store writes, and cold ELF/CFI loads.
 Install CPA from the latest release and start the systemd service:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
 ```
 
 Check that the service is running:
@@ -202,7 +202,7 @@ cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
 Uninstall CPA while preserving profiling data:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
 ```
 
 See [docs/en/usage.md](docs/en/usage.md) for more examples.
@@ -213,13 +213,13 @@ After a GitHub release is published, install the portable Linux x86_64 package
 with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
 ```
 
 To install a specific release tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
 ```
 
 For a locally built systemd-managed installation, use the deployment helper:

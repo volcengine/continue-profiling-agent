@@ -61,6 +61,7 @@ def test_release_installer_has_uninstall_path_and_quick_start_docs() -> None:
 
     assert "--uninstall" in installer
     assert "--purge-store" in installer
+    assert "refs/heads/main/tools/deploy_cpa.sh" in installer
     assert "deploy_cpa.sh --uninstall" in deploy_doc
 
     assert "## Quick Start" in readme

@@ -154,7 +154,7 @@ taskset -c 0 libs/libgunwinder/bin/cfi_bench \
 从最新 release 安装 CPA，并启动 systemd 服务：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
 ```
 
 检查服务状态：
@@ -186,7 +186,7 @@ cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
 卸载 CPA，但保留 profiling 数据：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
 ```
 
 更多示例见 [docs/zh-CN/usage.md](docs/zh-CN/usage.md)。
@@ -196,13 +196,13 @@ curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent
 GitHub Release 发布后，可以直接安装 Linux x86_64 portable 包：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
 ```
 
 安装指定 release tag：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
 ```
 
 如果使用本地构建产物，建议使用 systemd 托管 CPA，可以直接使用部署脚本：

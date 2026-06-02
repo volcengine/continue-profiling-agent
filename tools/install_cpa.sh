@@ -13,7 +13,7 @@ uninstall=0
 usage()
 {
 	cat <<'EOF'
-Usage: curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- [options]
+Usage: curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- [options]
 
 Downloads the CPA portable release artifact and installs it through
 tools/deploy_cpa.sh, or calls the deploy helper to uninstall CPA. Run as root
@@ -136,7 +136,7 @@ trap cleanup EXIT
 
 if [[ "$version" == "latest" ]]; then
 	asset_url="https://github.com/${repo}/releases/latest/download/${asset}"
-	deploy_ref="main"
+	deploy_ref="refs/heads/main"
 else
 	asset_url="https://github.com/${repo}/releases/download/${version}/${asset}"
 	deploy_ref="$version"
@@ -147,7 +147,7 @@ deploy="$workdir/deploy_cpa.sh"
 
 deploy_url="https://raw.githubusercontent.com/${repo}/${deploy_ref}/tools/deploy_cpa.sh"
 if ! curl -fL --retry 3 --retry-delay 2 -o "$deploy" "$deploy_url"; then
-	deploy_url="https://raw.githubusercontent.com/${repo}/main/tools/deploy_cpa.sh"
+	deploy_url="https://raw.githubusercontent.com/${repo}/refs/heads/main/tools/deploy_cpa.sh"
 	curl -fL --retry 3 --retry-delay 2 -o "$deploy" "$deploy_url"
 fi
 chmod 0755 "$deploy"
