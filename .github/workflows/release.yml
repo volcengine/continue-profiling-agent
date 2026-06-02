@@ -1,0 +1,108 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to package, for manual reruns"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    name: linux x86_64 portable package
+    runs-on: ubuntu-24.04
+    env:
+      CPA_BPF_LLVM_VERSION: "18"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf \
+            automake \
+            binutils-dev \
+            build-essential \
+            clang-18 \
+            cmake \
+            curl \
+            git \
+            libdw-dev \
+            libelf-dev \
+            libiberty-dev \
+            libssl-dev \
+            libtool \
+            libzstd-dev \
+            llvm-18 \
+            make \
+            pkg-config \
+            python3 \
+            zlib1g-dev \
+            zstd
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Show tool versions
+        run: |
+          cmake --version
+          gcc --version | head -n1
+          /usr/lib/llvm-${CPA_BPF_LLVM_VERSION}/bin/clang --version | head -n1
+          /usr/lib/llvm-${CPA_BPF_LLVM_VERSION}/bin/llvm-strip --version | head -n1
+          /usr/lib/llvm-${CPA_BPF_LLVM_VERSION}/bin/llvm-objdump --version | head -n1
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCPA_BPF_LLVM_VERSION=${CPA_BPF_LLVM_VERSION}
+
+      - name: Build CPA
+        run: cmake --build build -j
+
+      - name: Build SOPacker artifact
+        run: cmake --build build -j --target cpa_portable
+
+      - name: Smoke test package
+        run: |
+          mkdir -p dist
+          cp build/bin/cpa_portable dist/cpa_portable-linux-x86_64
+          chmod 0755 dist/cpa_portable-linux-x86_64
+          dist/cpa_portable-linux-x86_64 version
+          sha256sum dist/cpa_portable-linux-x86_64 > dist/cpa_portable-linux-x86_64.sha256
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              dist/cpa_portable-linux-x86_64 \
+              dist/cpa_portable-linux-x86_64.sha256 \
+              --clobber
+          else
+            gh release create "${RELEASE_TAG}" \
+              dist/cpa_portable-linux-x86_64 \
+              dist/cpa_portable-linux-x86_64.sha256 \
+              --verify-tag \
+              --title "continue-profiling-agent ${RELEASE_TAG}" \
+              --notes "Portable Linux x86_64 CPA package built with SOPacker."
+          fi

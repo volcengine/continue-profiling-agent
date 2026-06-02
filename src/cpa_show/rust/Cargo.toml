@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 ByteDance
+
+[package]
+name = "cpa_show"
+version = "1.0.0"
+edition = "2021"
+autobins = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossbeam-channel = "0.5"
+crossterm = "0.28"
+parking_lot = "0.12"
+ratatui = "0.28"
+thiserror = "2"
+unicode-width = "0.1"
+zstd = "0.13"
+memmap2 = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+# Keep debug symbols in release builds (similar to gcc -g, but optimized).
+# Use 1 for line tables only (smaller) or 2 for full debug info (larger).
+debug = 1

@@ -1,0 +1,14 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# IDEs / Editors
+.idea/
+.vscode/
+.coco
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+
