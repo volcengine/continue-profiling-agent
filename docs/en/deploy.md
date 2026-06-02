@@ -6,6 +6,79 @@ This guide describes a minimal systemd deployment for continuous profiling.
 The default deployment records on-CPU profiles at 49 Hz and writes data under
 `/var/log/cpa`.
 
+
+## Distribution Environment Setup
+
+For the release installer, the target host only needs a normal Linux userspace
+with `systemd`, `curl`, and enough privilege to install under `/usr/local`,
+`/etc/cpa`, `/etc/systemd/system`, and `/var/log/cpa`. The portable release
+artifact carries CPA and its bundled shared-library runtime.
+
+Use these commands when you want to build CPA locally before deployment.
+
+Ubuntu:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  autoconf automake binutils-dev build-essential clang cmake curl git \
+  libdw-dev libelf-dev libiberty-dev libssl-dev libtool libzstd-dev \
+  llvm make pkg-config python3 zlib1g-dev zstd cargo
+```
+
+Debian:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  autoconf automake binutils-dev build-essential clang cmake curl git \
+  libdw-dev libelf-dev libiberty-dev libssl-dev libtool libzstd-dev \
+  llvm make pkg-config python3 zlib1g-dev zstd cargo
+```
+
+CentOS Stream or Fedora:
+
+```bash
+sudo dnf install -y \
+  autoconf automake binutils-devel clang cmake curl elfutils-devel \
+  elfutils-libelf-devel gcc gcc-c++ git libiberty-devel libtool llvm \
+  make openssl-devel pkgconf-pkg-config python3 rust cargo zlib-devel \
+  zstd zstd-devel
+```
+
+CPA requires `cmake >= 3.10`. Check the selected CMake before configuring:
+
+```bash
+cmake --version
+```
+
+On older CentOS systems where `/usr/bin/cmake` is too old, install `cmake3`
+and use it for configure and build:
+
+```bash
+sudo yum install -y epel-release
+sudo yum install -y cmake3
+cmake3 -S . -B build
+cmake3 --build build -j
+```
+
+If the default LLVM is too old for your environment, install LLVM 15 from
+apt.llvm.org and put it first in your shell `PATH`:
+
+```bash
+wget https://apt.llvm.org/llvm.sh
+chmod +x ./llvm.sh
+sudo ./llvm.sh 15
+
+# Add this line to your shell startup file, for example ~/.bashrc or ~/.zshrc.
+export PATH=/usr/lib/llvm-15/bin:$PATH
+```
+
+Then configure with `-DCPA_BPF_LLVM_VERSION=15`.
+
+Before deploying, also check the kernel warning in
+[docs/en/kernel-compatibility.md](kernel-compatibility.md).
+
 ## Build the Agent
 
 Build CPA on the target host or on a compatible build host:

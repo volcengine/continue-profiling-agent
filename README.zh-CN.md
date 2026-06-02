@@ -11,6 +11,8 @@
 
 ## 为什么需要 CPA
 
+![错过现场的 perf 和可回看历史的 CPA](docs/assets/technical-deep-dive/01-missed-perf-cpa.png)
+
 - 极低开销、近乎无感：通过极致优化的 libgunwinder，CPA 可以在极低开销下，
   甚至无感的情况下，持续记录整机所有进程的秒级火焰图。
 - 持续留存现场：CPA 在本机滚动保留最近的秒级 profiling 历史。
@@ -60,7 +62,89 @@ CPA 可以分成四层：
 - BPF 第三方依赖来源与 pin 方式详见 [docs/zh-CN/bpf-dependencies.md](docs/zh-CN/bpf-dependencies.md)
 - 技术解读详见 [docs/zh-CN/technical-deep-dive.md](docs/zh-CN/technical-deep-dive.md)
 
-## 构建
+## 内核兼容性警告
+
+不要在 upstream Linux 5.19 到 6.3 的内核上运行 CPA，包括 6.1 LTS。
+该范围内存在 BPF `copy_from_user_nofault()` 内核 bug，可能导致主机死锁。生产环境安装
+CPA 前，请先阅读 [docs/zh-CN/kernel-compatibility.md](docs/zh-CN/kernel-compatibility.md)。
+
+## 快速开始
+
+从最新 release 安装 CPA，并启动 systemd 服务：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
+```
+
+检查服务状态：
+
+```bash
+sudo systemctl status cpa.service
+cpa version
+```
+
+CPA 默认把 profiling 数据写到 `/var/log/cpa`。查看某个 profile 目录的可用
+时间范围：
+
+```bash
+cpa show --read /var/log/cpa/cpa_YYMMDD --show_range 1
+```
+
+导出 flamegraph：
+
+```bash
+cpa show --read /var/log/cpa/cpa_YYMMDD --output_prof cpa.prof
+```
+
+打开内嵌 Rust TUI：
+
+```bash
+cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
+```
+
+卸载 CPA，但保留 profiling 数据：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
+```
+
+更多示例见 [docs/zh-CN/usage.md](docs/zh-CN/usage.md)。
+
+## 手动部署
+
+GitHub Release 发布后，可以直接安装 Linux x86_64 portable 包：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
+```
+
+安装指定 release tag：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+```
+
+如果使用本地构建产物，建议使用 systemd 托管 CPA，可以直接使用部署脚本：
+
+```bash
+sudo tools/deploy_cpa.sh --binary build/bin/cpa
+```
+
+如果目标机器没有 `/sys/kernel/btf/vmlinux`，需要先用 `pahole` 基于匹配当前
+内核的 debug-info `vmlinux` 生成 detached BTF，并显式传入：
+
+```bash
+sudo mkdir -p /etc/cpa
+sudo pahole --btf_encode_detached=/etc/cpa/vmlinux.btf \
+  /usr/lib/debug/boot/vmlinux-$(uname -r)
+sudo tools/deploy_cpa.sh --binary build/bin/cpa --btf /etc/cpa/vmlinux.btf
+```
+
+脚本会创建 `/var/log/cpa`，写入 `/etc/cpa/cpa.conf`，安装
+`cpa.service` systemd unit，并默认以 49 Hz 启动 CPA。完整说明见
+[docs/zh-CN/deploy.md](docs/zh-CN/deploy.md)。
+
+## 手动构建
 
 前置条件：
 
@@ -126,7 +210,8 @@ LD_PRELOAD=/path/to/libgunwinder.so ./cpa_portable version
 
 如果 `/tmp` 被清理，或 portable 产物本身更新，需要重新执行解包和替换步骤。
 
-完整构建与测试说明见 [docs/zh-CN/build.md](docs/zh-CN/build.md)。
+发行版依赖、LLVM/CMake 注意事项以及完整构建与测试说明见 [docs/zh-CN/build.md](docs/zh-CN/build.md)。
+
 
 ## libgunwinder CFI Benchmark
 
@@ -149,81 +234,6 @@ taskset -c 0 libs/libgunwinder/bin/cfi_bench \
 采样速率列是理论值，计算方式为 CFI frames/s 除以平均栈深度。CPA
 端到端吞吐还包含采样、排队、符号格式化、store 写入以及 ELF/CFI 冷加载。
 
-## 快速开始
-
-从最新 release 安装 CPA，并启动 systemd 服务：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
-```
-
-检查服务状态：
-
-```bash
-sudo systemctl status cpa.service
-cpa version
-```
-
-CPA 默认把 profiling 数据写到 `/var/log/cpa`。查看某个 profile 目录的可用
-时间范围：
-
-```bash
-cpa show --read /var/log/cpa/cpa_YYMMDD --show_range 1
-```
-
-导出 flamegraph：
-
-```bash
-cpa show --read /var/log/cpa/cpa_YYMMDD --output_prof cpa.prof
-```
-
-打开内嵌 Rust TUI：
-
-```bash
-cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
-```
-
-卸载 CPA，但保留 profiling 数据：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
-```
-
-更多示例见 [docs/zh-CN/usage.md](docs/zh-CN/usage.md)。
-
-## 部署
-
-GitHub Release 发布后，可以直接安装 Linux x86_64 portable 包：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
-```
-
-安装指定 release tag：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
-```
-
-如果使用本地构建产物，建议使用 systemd 托管 CPA，可以直接使用部署脚本：
-
-```bash
-sudo tools/deploy_cpa.sh --binary build/bin/cpa
-```
-
-如果目标机器没有 `/sys/kernel/btf/vmlinux`，需要先用 `pahole` 基于匹配当前
-内核的 debug-info `vmlinux` 生成 detached BTF，并显式传入：
-
-```bash
-sudo mkdir -p /etc/cpa
-sudo pahole --btf_encode_detached=/etc/cpa/vmlinux.btf \
-  /usr/lib/debug/boot/vmlinux-$(uname -r)
-sudo tools/deploy_cpa.sh --binary build/bin/cpa --btf /etc/cpa/vmlinux.btf
-```
-
-脚本会创建 `/var/log/cpa`，写入 `/etc/cpa/cpa.conf`，安装
-`cpa.service` systemd unit，并默认以 49 Hz 启动 CPA。完整说明见
-[docs/zh-CN/deploy.md](docs/zh-CN/deploy.md)。
 
 ## 选项总览
 

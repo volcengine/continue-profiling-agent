@@ -12,6 +12,8 @@ for the issue to reproduce.
 
 ## Why CPA
 
+![Missed perf captures and replayable CPA history](docs/assets/technical-deep-dive/01-missed-perf-cpa.png)
+
 - Ultra-low overhead: with the highly optimized libgunwinder, CPA can
   continuously record whole-machine, per-second flamegraphs for all processes
   at very low and often unnoticeable cost.
@@ -71,7 +73,92 @@ For the on-disk format and backend fallback rules, see:
 - [English: BPF Third-Party Dependencies](docs/en/bpf-dependencies.md)
 - [English: Technical Deep Dive](docs/en/technical-deep-dive.md)
 
-## Build
+## Kernel Compatibility Warning
+
+Do not run CPA on upstream Linux kernels from 5.19 through 6.3, including
+the 6.1 LTS line. A kernel BPF `copy_from_user_nofault()` bug in that
+range can deadlock the host. See
+[docs/en/kernel-compatibility.md](docs/en/kernel-compatibility.md)
+before installing CPA on production machines.
+
+## Quick Start
+
+Install CPA from the latest release and start the systemd service:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
+```
+
+Check that the service is running:
+
+```bash
+sudo systemctl status cpa.service
+cpa version
+```
+
+CPA stores profiling data under `/var/log/cpa` by default. Print the available
+time range from a stored directory:
+
+```bash
+cpa show --read /var/log/cpa/cpa_YYMMDD --show_range 1
+```
+
+Export a flamegraph profile:
+
+```bash
+cpa show --read /var/log/cpa/cpa_YYMMDD --output_prof cpa.prof
+```
+
+Open the embedded Rust TUI:
+
+```bash
+cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
+```
+
+Uninstall CPA while preserving profiling data:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
+```
+
+See [docs/en/usage.md](docs/en/usage.md) for more examples.
+
+## Manual Deployment
+
+After a GitHub release is published, install the portable Linux x86_64 package
+with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
+```
+
+To install a specific release tag:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+```
+
+For a locally built systemd-managed installation, use the deployment helper:
+
+```bash
+sudo tools/deploy_cpa.sh --binary build/bin/cpa
+```
+
+On hosts without `/sys/kernel/btf/vmlinux`, generate a matching detached BTF
+with `pahole` and pass it explicitly:
+
+```bash
+sudo mkdir -p /etc/cpa
+sudo pahole --btf_encode_detached=/etc/cpa/vmlinux.btf \
+  /usr/lib/debug/boot/vmlinux-$(uname -r)
+sudo tools/deploy_cpa.sh --binary build/bin/cpa --btf /etc/cpa/vmlinux.btf
+```
+
+The helper creates `/var/log/cpa`, writes `/etc/cpa/cpa.conf`, installs a
+`cpa.service` systemd unit, and starts CPA at 49 Hz by default. See
+[docs/en/deploy.md](docs/en/deploy.md) for the full deployment guide.
+
+## Manual Build
 
 Prerequisites:
 
@@ -140,7 +227,8 @@ LD_PRELOAD=/path/to/libgunwinder.so ./cpa_portable version
 If `/tmp` is cleaned or the portable artifact changes, repeat the extraction and
 replacement steps.
 
-See [docs/en/build.md](docs/en/build.md) for a complete build and test guide.
+See [docs/en/build.md](docs/en/build.md) for distro packages, LLVM/CMake notes, and the complete build and test guide.
+
 
 ## libgunwinder CFI Benchmark
 
@@ -165,82 +253,6 @@ The sample-rate columns are theoretical values calculated as CFI frames per
 second divided by average stack depth. End-to-end CPA throughput also includes
 sampling, queueing, symbol formatting, store writes, and cold ELF/CFI loads.
 
-## Quick Start
-
-Install CPA from the latest release and start the systemd service:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
-```
-
-Check that the service is running:
-
-```bash
-sudo systemctl status cpa.service
-cpa version
-```
-
-CPA stores profiling data under `/var/log/cpa` by default. Print the available
-time range from a stored directory:
-
-```bash
-cpa show --read /var/log/cpa/cpa_YYMMDD --show_range 1
-```
-
-Export a flamegraph profile:
-
-```bash
-cpa show --read /var/log/cpa/cpa_YYMMDD --output_prof cpa.prof
-```
-
-Open the embedded Rust TUI:
-
-```bash
-cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
-```
-
-Uninstall CPA while preserving profiling data:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
-```
-
-See [docs/en/usage.md](docs/en/usage.md) for more examples.
-
-## Deployment
-
-After a GitHub release is published, install the portable Linux x86_64 package
-with:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
-```
-
-To install a specific release tag:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
-```
-
-For a locally built systemd-managed installation, use the deployment helper:
-
-```bash
-sudo tools/deploy_cpa.sh --binary build/bin/cpa
-```
-
-On hosts without `/sys/kernel/btf/vmlinux`, generate a matching detached BTF
-with `pahole` and pass it explicitly:
-
-```bash
-sudo mkdir -p /etc/cpa
-sudo pahole --btf_encode_detached=/etc/cpa/vmlinux.btf \
-  /usr/lib/debug/boot/vmlinux-$(uname -r)
-sudo tools/deploy_cpa.sh --binary build/bin/cpa --btf /etc/cpa/vmlinux.btf
-```
-
-The helper creates `/var/log/cpa`, writes `/etc/cpa/cpa.conf`, installs a
-`cpa.service` systemd unit, and starts CPA at 49 Hz by default. See
-[docs/en/deploy.md](docs/en/deploy.md) for the full deployment guide.
 
 ## Option Reference
 

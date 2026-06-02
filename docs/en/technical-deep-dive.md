@@ -5,6 +5,10 @@ continuous profiling is not the same as keeping a one-shot profiler always
 enabled, and how CPA combines libgunwinder, BPF/perf capture, online unwinding,
 and rolling storage to keep useful profiling history on production hosts.
 
+For additional background, the CLK 2025 talk slides for this project provide
+a compact architecture overview and motivation: [Continuous Profiling at CLK
+2025](https://github.com/ChinaLinuxKernel/CLK2025/blob/main/4%20%E8%B0%83%E5%BA%A6%E3%80%81%E6%80%A7%E8%83%BD%E4%B8%8E%E8%B0%83%E8%AF%95%E5%88%86%E8%AE%BA%E5%9D%9B/2%20%E7%AB%A0%E9%9B%A8%E5%AE%B8-%E6%8C%81%E7%BB%ADProfiling.pdf).
+
 ## Keywords And Strengths
 
 - Low CPU overhead: the cost scales with sample frequency, active CPU count,

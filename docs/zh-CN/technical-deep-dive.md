@@ -4,6 +4,9 @@
 不能简单等同于“把一次性 profiler 常开”，以及 CPA 如何通过
 libgunwinder、BPF/perf 采集、在线回溯和滚动存储，把性能现场长期保留下来。
 
+补充背景可参考该项目在 CLK 2025 的分享材料，里面对整体架构和动机有更压缩的
+说明：[持续 Profiling - CLK 2025](https://github.com/ChinaLinuxKernel/CLK2025/blob/main/4%20%E8%B0%83%E5%BA%A6%E3%80%81%E6%80%A7%E8%83%BD%E4%B8%8E%E8%B0%83%E8%AF%95%E5%88%86%E8%AE%BA%E5%9D%9B/2%20%E7%AB%A0%E9%9B%A8%E5%AE%B8-%E6%8C%81%E7%BB%ADProfiling.pdf)。
+
 ## 关键词与优势
 
 - 极低 CPU 开销：开销随采样频率、活跃 CPU、栈深度和 ELF 数量变化。

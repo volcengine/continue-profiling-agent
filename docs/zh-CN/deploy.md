@@ -5,6 +5,79 @@
 本文说明最小 systemd 部署方式。默认部署以 49 Hz 做持续 on-CPU
 profiling，并把数据写到 `/var/log/cpa`。
 
+
+## 发行版环境准备
+
+如果直接使用 Release 安装脚本，目标机器只需要常规 Linux userspace、
+`systemd`、`curl`，以及写入 `/usr/local`、`/etc/cpa`、
+`/etc/systemd/system` 和 `/var/log/cpa` 的权限。portable release 产物已经
+携带 CPA 及其打包的 shared-library runtime。
+
+如果需要在部署前本地构建 CPA，可参考下面的依赖安装命令。
+
+Ubuntu：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  autoconf automake binutils-dev build-essential clang cmake curl git \
+  libdw-dev libelf-dev libiberty-dev libssl-dev libtool libzstd-dev \
+  llvm make pkg-config python3 zlib1g-dev zstd cargo
+```
+
+Debian：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  autoconf automake binutils-dev build-essential clang cmake curl git \
+  libdw-dev libelf-dev libiberty-dev libssl-dev libtool libzstd-dev \
+  llvm make pkg-config python3 zlib1g-dev zstd cargo
+```
+
+CentOS Stream 或 Fedora：
+
+```bash
+sudo dnf install -y \
+  autoconf automake binutils-devel clang cmake curl elfutils-devel \
+  elfutils-libelf-devel gcc gcc-c++ git libiberty-devel libtool llvm \
+  make openssl-devel pkgconf-pkg-config python3 rust cargo zlib-devel \
+  zstd zstd-devel
+```
+
+CPA 需要 `cmake >= 3.10`。配置前先确认 CMake 版本：
+
+```bash
+cmake --version
+```
+
+如果较老的 CentOS 系统里 `/usr/bin/cmake` 版本过低，可安装 `cmake3`，并
+用 `cmake3` 执行配置和构建：
+
+```bash
+sudo yum install -y epel-release
+sudo yum install -y cmake3
+cmake3 -S . -B build
+cmake3 --build build -j
+```
+
+如果默认 LLVM 版本过旧，可以从 apt.llvm.org 安装 LLVM 15，并把它放到
+shell `PATH` 前面：
+
+```bash
+wget https://apt.llvm.org/llvm.sh
+chmod +x ./llvm.sh
+sudo ./llvm.sh 15
+
+# 把这一行加入你的 shell 启动文件，例如 ~/.bashrc 或 ~/.zshrc。
+export PATH=/usr/lib/llvm-15/bin:$PATH
+```
+
+然后配置时传入 `-DCPA_BPF_LLVM_VERSION=15`。
+
+部署前还需要阅读
+[docs/zh-CN/kernel-compatibility.md](kernel-compatibility.md) 中的内核风险说明。
+
 ## 构建 Agent
 
 可以在目标机器构建，也可以在兼容的构建机上构建：

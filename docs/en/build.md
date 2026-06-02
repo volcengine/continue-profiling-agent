@@ -36,6 +36,20 @@ sudo apt-get install -y --no-install-recommends \
 
 Then configure with `-DCPA_BPF_LLVM_VERSION=18`.
 
+If your distribution packages an older LLVM by default, install LLVM 15 from
+apt.llvm.org and put its tools first in your shell `PATH`:
+
+```bash
+wget https://apt.llvm.org/llvm.sh
+chmod +x ./llvm.sh
+sudo ./llvm.sh 15
+
+# Add this line to your shell startup file, for example ~/.bashrc or ~/.zshrc.
+export PATH=/usr/lib/llvm-15/bin:$PATH
+```
+
+Then configure with `-DCPA_BPF_LLVM_VERSION=15`.
+
 Practical requirements:
 
 - a kernel with usable BTF/CO-RE support for the BPF backend

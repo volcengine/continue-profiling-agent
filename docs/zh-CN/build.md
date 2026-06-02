@@ -36,6 +36,20 @@ sudo apt-get install -y --no-install-recommends \
 
 然后配置时传入 `-DCPA_BPF_LLVM_VERSION=18`。
 
+如果发行版默认 LLVM 版本较旧，可以从 apt.llvm.org 安装 LLVM 15，并把对应
+工具目录放到 shell `PATH` 前面：
+
+```bash
+wget https://apt.llvm.org/llvm.sh
+chmod +x ./llvm.sh
+sudo ./llvm.sh 15
+
+# 把这一行加入你的 shell 启动文件，例如 ~/.bashrc 或 ~/.zshrc。
+export PATH=/usr/lib/llvm-15/bin:$PATH
+```
+
+然后配置时传入 `-DCPA_BPF_LLVM_VERSION=15`。
+
 实际还需要：
 
 - 能正常使用 BTF/CO-RE 的内核环境
