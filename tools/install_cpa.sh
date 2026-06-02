@@ -8,6 +8,7 @@ repo="${CPA_RELEASE_REPO:-volcengine/continue-profiling-agent}"
 version="${CPA_RELEASE_VERSION:-latest}"
 asset="${CPA_RELEASE_ASSET:-}"
 deploy_args=()
+uninstall=0
 
 usage()
 {
@@ -15,7 +16,8 @@ usage()
 Usage: curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- [options]
 
 Downloads the CPA portable release artifact and installs it through
-tools/deploy_cpa.sh. Run as root because the deploy helper writes systemd,
+tools/deploy_cpa.sh, or calls the deploy helper to uninstall CPA. Run as root
+because the deploy helper writes systemd,
 /etc/cpa, /usr/local, and /var/log/cpa by default.
 
 Options:
@@ -29,6 +31,8 @@ Options:
   --record-interval SEC  store/query interval passed to deploy_cpa.sh
   --persistent-day DAYS  retention window passed to deploy_cpa.sh
   --no-start             install files without starting cpa.service
+  --uninstall            remove installed CPA files and cpa.service
+  --purge-store          with --uninstall, also remove the profile store root
   -h, --help             show this help
 
 Environment:
@@ -78,6 +82,15 @@ while [[ $# -gt 0 ]]; do
 		deploy_args+=("$1")
 		shift
 		;;
+	--uninstall)
+		uninstall=1
+		deploy_args+=("$1")
+		shift
+		;;
+	--purge-store)
+		deploy_args+=("$1")
+		shift
+		;;
 	-h|--help)
 		usage
 		exit 0
@@ -95,16 +108,18 @@ if [[ "$(id -u)" != "0" ]]; then
 	exit 1
 fi
 
-case "$(uname -m)" in
+if [[ "$uninstall" != "1" ]]; then
+	case "$(uname -m)" in
 	x86_64|amd64) default_asset="cpa_portable-linux-x86_64" ;;
 	*)
 		echo "unsupported architecture for prebuilt CPA release: $(uname -m)" >&2
 		exit 1
 		;;
-esac
+	esac
 
-if [[ -z "$asset" ]]; then
-	asset="$default_asset"
+	if [[ -z "$asset" ]]; then
+		asset="$default_asset"
+	fi
 fi
 
 if ! command -v curl >/dev/null 2>&1; then
@@ -130,16 +145,22 @@ fi
 binary="$workdir/cpa"
 deploy="$workdir/deploy_cpa.sh"
 
-echo "Downloading ${asset_url}"
-curl -fL --retry 3 --retry-delay 2 -o "$binary" "$asset_url"
-chmod 0755 "$binary"
-
 deploy_url="https://raw.githubusercontent.com/${repo}/${deploy_ref}/tools/deploy_cpa.sh"
 if ! curl -fL --retry 3 --retry-delay 2 -o "$deploy" "$deploy_url"; then
 	deploy_url="https://raw.githubusercontent.com/${repo}/main/tools/deploy_cpa.sh"
 	curl -fL --retry 3 --retry-delay 2 -o "$deploy" "$deploy_url"
 fi
 chmod 0755 "$deploy"
+
+if [[ "$uninstall" == "1" ]]; then
+	"$deploy" "${deploy_args[@]}"
+	echo "CPA uninstall finished."
+	exit 0
+fi
+
+echo "Downloading ${asset_url}"
+curl -fL --retry 3 --retry-delay 2 -o "$binary" "$asset_url"
+chmod 0755 "$binary"
 
 "$binary" version
 "$deploy" --binary "$binary" "${deploy_args[@]}"

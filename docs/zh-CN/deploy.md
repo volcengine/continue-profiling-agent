@@ -106,6 +106,27 @@ record_env_name: POD_NAME,MY_POD_NAME
 btf_path: /etc/cpa/vmlinux.btf
 ```
 
+## 卸载
+
+卸载已安装的二进制、软链接、配置文件和 systemd unit，同时保留
+`/var/log/cpa` 下的 profiling 数据：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
+```
+
+如果使用本地 checkout，也可以执行：
+
+```bash
+sudo tools/deploy_cpa.sh --uninstall
+```
+
+如果需要同时删除 profile 存储目录，追加 `--purge-store`：
+
+```bash
+sudo tools/deploy_cpa.sh --uninstall --purge-store
+```
+
 ## 手动 systemd Service
 
 如果希望自己管理文件，可以把二进制和 shared library 放在同一个目录，创建

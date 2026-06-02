@@ -19,6 +19,8 @@ persistent_day="${CPA_PERSISTENT_DAY:-7}"
 log_print_cycles="${CPA_LOG_PRINT_CYCLES:-10}"
 btf_path="${CPA_BTF_PATH:-}"
 start_service=1
+uninstall=0
+remove_profile_store=0
 
 usage()
 {
@@ -38,6 +40,8 @@ Options:
   --record-interval SEC  store/query interval (default: 1)
   --persistent-day DAYS  retention window (default: 7)
   --no-start             install files without starting the service
+  --uninstall            remove installed CPA files and cpa.service
+  --purge-store          with --uninstall, also remove the profile store root
   -h, --help             show this help
 
 Environment:
@@ -64,6 +68,33 @@ require_value()
 		echo "$1 requires a value" >&2
 		exit 2
 	fi
+}
+
+uninstall_cpa()
+{
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl stop cpa.service || true
+		systemctl disable cpa.service || true
+	fi
+
+	rm -f -- "$service_path"
+	rm -f -- "$bin_link"
+	rm -rf -- "$install_dir"
+	rm -f -- "$config_path"
+	rmdir -- "$config_dir" 2>/dev/null || true
+
+	if [[ "$remove_profile_store" == "1" ]]; then
+		rm -rf -- "$store_dir"
+		echo "Removed CPA profile store: $store_dir"
+	else
+		echo "Preserved CPA profile store: $store_dir"
+	fi
+
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl daemon-reload || true
+	fi
+
+	echo "CPA uninstalled."
 }
 
 while [[ $# -gt 0 ]]; do
@@ -107,6 +138,14 @@ while [[ $# -gt 0 ]]; do
 		start_service=0
 		shift
 		;;
+	--uninstall)
+		uninstall=1
+		shift
+		;;
+	--purge-store)
+		remove_profile_store=1
+		shift
+		;;
 	-h|--help)
 		usage
 		exit 0
@@ -122,6 +161,11 @@ done
 if [[ "$(id -u)" != "0" ]]; then
 	echo "deploy_cpa.sh must run as root." >&2
 	exit 1
+fi
+
+if [[ "$uninstall" == "1" ]]; then
+	uninstall_cpa
+	exit 0
 fi
 
 if [[ ! -x "$binary" ]]; then

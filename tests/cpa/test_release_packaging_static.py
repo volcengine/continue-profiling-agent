@@ -45,3 +45,26 @@ def test_deploy_script_documents_env_and_creates_link_parent() -> None:
     assert "CPA_INSTALL_DIR" in text
     assert "CPA_BIN_LINK" in text
     assert "mkdir -p" in text and "dirname" in text and "bin_link" in text
+
+
+def test_release_installer_has_uninstall_path_and_quick_start_docs() -> None:
+    deploy = (REPO_ROOT / "tools" / "deploy_cpa.sh").read_text(encoding="utf-8")
+    installer = (REPO_ROOT / "tools" / "install_cpa.sh").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    deploy_doc = (REPO_ROOT / "docs" / "en" / "deploy.md").read_text(encoding="utf-8")
+
+    assert "--uninstall" in deploy
+    assert "--purge-store" in deploy
+    assert "remove_profile_store" in deploy
+    assert "systemctl disable" in deploy
+    assert "systemctl stop" in deploy
+
+    assert "--uninstall" in installer
+    assert "--purge-store" in installer
+    assert "deploy_cpa.sh --uninstall" in deploy_doc
+
+    assert "## Quick Start" in readme
+    assert "Install CPA from the latest release" in readme
+    assert "tools/install_cpa.sh | sudo bash" in readme
+    assert "sudo systemctl status cpa.service" in readme
+    assert "--uninstall" in readme

@@ -151,32 +151,42 @@ taskset -c 0 libs/libgunwinder/bin/cfi_bench \
 
 ## 快速开始
 
-启动持续剖析：
+从最新 release 安装 CPA，并启动 systemd 服务：
 
 ```bash
-sudo mkdir -p /var/log/cpa
-sudo ./build/bin/cpa monitor --store_dir /var/log/cpa --freq 49
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash
 ```
 
-查看某个 profile 目录的可用时间范围：
+检查服务状态：
 
 ```bash
-./build/bin/cpa show --read /var/log/cpa/cpa_YYMMDD --show_range 1
+sudo systemctl status cpa.service
+cpa version
+```
+
+CPA 默认把 profiling 数据写到 `/var/log/cpa`。查看某个 profile 目录的可用
+时间范围：
+
+```bash
+cpa show --read /var/log/cpa/cpa_YYMMDD --show_range 1
 ```
 
 导出 flamegraph：
 
 ```bash
-./build/bin/cpa show --read /var/log/cpa/cpa_YYMMDD --output_prof cpa.prof
+cpa show --read /var/log/cpa/cpa_YYMMDD --output_prof cpa.prof
 ```
-
-如果不传 `--starttime` 和 `--endtime`，导出会从第一个匹配当前筛选条件的
-record 开始。需要指定时间窗口时，建议先用 `--show_range` 查看可用范围。
 
 打开内嵌 Rust TUI：
 
 ```bash
-./build/bin/cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
+cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
+```
+
+卸载 CPA，但保留 profiling 数据：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
 ```
 
 更多示例见 [docs/zh-CN/usage.md](docs/zh-CN/usage.md)。

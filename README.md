@@ -167,33 +167,42 @@ sampling, queueing, symbol formatting, store writes, and cold ELF/CFI loads.
 
 ## Quick Start
 
-Start continuous profiling:
+Install CPA from the latest release and start the systemd service:
 
 ```bash
-sudo mkdir -p /var/log/cpa
-sudo ./build/bin/cpa monitor --store_dir /var/log/cpa --freq 49
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash
 ```
 
-Print the available time range from a stored directory:
+Check that the service is running:
 
 ```bash
-./build/bin/cpa show --read /var/log/cpa/cpa_YYMMDD --show_range 1
+sudo systemctl status cpa.service
+cpa version
+```
+
+CPA stores profiling data under `/var/log/cpa` by default. Print the available
+time range from a stored directory:
+
+```bash
+cpa show --read /var/log/cpa/cpa_YYMMDD --show_range 1
 ```
 
 Export a flamegraph profile:
 
 ```bash
-./build/bin/cpa show --read /var/log/cpa/cpa_YYMMDD --output_prof cpa.prof
+cpa show --read /var/log/cpa/cpa_YYMMDD --output_prof cpa.prof
 ```
-
-Without `--starttime` and `--endtime`, export starts from the first record that
-matches the selected filters. Use `--show_range` first when you need a specific
-time window.
 
 Open the embedded Rust TUI:
 
 ```bash
-./build/bin/cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
+cpa show --read /var/log/cpa/cpa_YYMMDD --use_cui
+```
+
+Uninstall CPA while preserving profiling data:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
 ```
 
 See [docs/en/usage.md](docs/en/usage.md) for more examples.

@@ -113,6 +113,27 @@ If `--btf` is provided, the script also writes:
 btf_path: /etc/cpa/vmlinux.btf
 ```
 
+## Uninstall
+
+Remove the installed binary, symlink, config file, and systemd unit while
+preserving profiling data under `/var/log/cpa`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/main/tools/install_cpa.sh | sudo bash -s -- --uninstall
+```
+
+For a local checkout, run:
+
+```bash
+sudo tools/deploy_cpa.sh --uninstall
+```
+
+To also remove the profile store root, add `--purge-store`:
+
+```bash
+sudo tools/deploy_cpa.sh --uninstall --purge-store
+```
+
 ## Manual systemd Service
 
 If you prefer to manage files yourself, install the binary and shared library
