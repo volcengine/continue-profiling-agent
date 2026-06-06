@@ -135,7 +135,23 @@ add_custom_target(cpa_generate_workers DEPENDS "${CPA_WORKERS_H}")
 set(CPA_GUNWINDER_PATH "${CPA_ROOT}/libs/libgunwinder")
 set(CPA_GUNWINDER_INCLUDE_DIR "${CPA_GUNWINDER_PATH}/include")
 set(CPA_GUNWINDER_SOURCE_LIBRARY "${CPA_GUNWINDER_PATH}/lib/libgunwinder.so")
+set(
+    CPA_GUNWINDER_SOURCE_LIBRARY_SONAME
+    "${CPA_GUNWINDER_PATH}/lib/libgunwinder.so.1"
+)
+set(
+    CPA_GUNWINDER_SOURCE_LIBRARY_REAL
+    "${CPA_GUNWINDER_PATH}/lib/libgunwinder.so.1.0.0"
+)
 set(CPA_GUNWINDER_RUNTIME_LIBRARY "${CPA_BPF_BIN_DIR}/libgunwinder.so")
+set(
+    CPA_GUNWINDER_RUNTIME_LIBRARY_SONAME
+    "${CPA_BPF_BIN_DIR}/libgunwinder.so.1"
+)
+set(
+    CPA_GUNWINDER_RUNTIME_LIBRARY_REAL
+    "${CPA_BPF_BIN_DIR}/libgunwinder.so.1.0.0"
+)
 if(NOT IS_DIRECTORY "${CPA_GUNWINDER_PATH}")
     message(FATAL_ERROR "vendored libgunwinder source directory not found: ${CPA_GUNWINDER_PATH}")
 endif()
@@ -162,18 +178,33 @@ cpa_bpf_wrap_quiet_command(
     "lib/libgunwinder.so"
 )
 add_custom_command(
-    OUTPUT "${CPA_GUNWINDER_SOURCE_LIBRARY}"
+    OUTPUT
+        "${CPA_GUNWINDER_SOURCE_LIBRARY}"
+        "${CPA_GUNWINDER_SOURCE_LIBRARY_SONAME}"
+        "${CPA_GUNWINDER_SOURCE_LIBRARY_REAL}"
     COMMAND ${cpa_gunwinder_build_cmd}
     WORKING_DIRECTORY "${CPA_GUNWINDER_PATH}"
     DEPENDS ${CPA_GUNWINDER_SOURCES}
     VERBATIM
 )
 add_custom_command(
-    OUTPUT "${CPA_GUNWINDER_RUNTIME_LIBRARY}"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        "${CPA_GUNWINDER_SOURCE_LIBRARY}"
+    OUTPUT
         "${CPA_GUNWINDER_RUNTIME_LIBRARY}"
-    DEPENDS "${CPA_GUNWINDER_SOURCE_LIBRARY}"
+        "${CPA_GUNWINDER_RUNTIME_LIBRARY_SONAME}"
+        "${CPA_GUNWINDER_RUNTIME_LIBRARY_REAL}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CPA_GUNWINDER_SOURCE_LIBRARY_REAL}"
+        "${CPA_GUNWINDER_RUNTIME_LIBRARY_REAL}"
+    COMMAND "${CMAKE_COMMAND}" -E create_symlink
+        "libgunwinder.so.1.0.0"
+        "${CPA_GUNWINDER_RUNTIME_LIBRARY_SONAME}"
+    COMMAND "${CMAKE_COMMAND}" -E create_symlink
+        "libgunwinder.so.1"
+        "${CPA_GUNWINDER_RUNTIME_LIBRARY}"
+    DEPENDS
+        "${CPA_GUNWINDER_SOURCE_LIBRARY}"
+        "${CPA_GUNWINDER_SOURCE_LIBRARY_SONAME}"
+        "${CPA_GUNWINDER_SOURCE_LIBRARY_REAL}"
     VERBATIM
 )
 add_custom_target(cpa_gunwinder_build DEPENDS "${CPA_GUNWINDER_RUNTIME_LIBRARY}")
