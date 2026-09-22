@@ -13,7 +13,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(CPA_BPF_LLVM_VERSION "15" CACHE STRING "")
-set(CPA_BPF_VERSION "1.0.0" CACHE STRING "")
+set(CPA_BPF_VERSION "1.1.0" CACHE STRING "")
 
 option(CPA_BPF_ENABLE_ASAN "enable asan" OFF)
 option(CPA_BPF_QUIET_BUILD "suppress sub-build stdout (show warnings/errors only)" ON)
