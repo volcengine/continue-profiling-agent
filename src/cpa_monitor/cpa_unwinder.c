@@ -40,6 +40,19 @@ static char default_env_name[] = "SYSTEM";
 struct single_queue pid_exit_queue;
 struct single_queue stack_queue;
 
+/* Idle worker polling: back off geometrically 1ms -> 50ms while the
+ * sample queue stays empty, instead of waking 1000 times per second.
+ */
+#define CPA_UNWIND_IDLE_SLEEP_MIN_US 1000U
+#define CPA_UNWIND_IDLE_SLEEP_MAX_US 50000U
+
+static unsigned int cpa_unwinder_next_idle_sleep(unsigned int current_us)
+{
+	if (current_us >= CPA_UNWIND_IDLE_SLEEP_MAX_US / 2)
+		return CPA_UNWIND_IDLE_SLEEP_MAX_US;
+	return current_us * 2;
+}
+
 #define MIN_QUEUE_SIZE 16
 #define CPA_RECORD_DAY_MS (24ULL * 60ULL * 60ULL * 1000ULL)
 #define CPA_NS_PER_MS 1000000ULL
@@ -629,6 +642,19 @@ static void process_single_frame_p(const struct gu_frame_record *frame, void *cb
 }
 
 static char irqoff_sample[64] = { 0 };
+
+static const char *cpa_signal_name(int sig)
+{
+	switch (sig) {
+	case 6: return "SIGABRT";
+	case 7: return "SIGBUS";
+	case 8: return "SIGFPE";
+	case 4: return "SIGILL";
+	case 11: return "SIGSEGV";
+	case 5: return "SIGTRAP";
+	default: return "SIG?";
+	}
+}
 static char single_ksym[256] = { 0 };
 
 static unsigned long last_sample_ts = 0;
@@ -642,6 +668,14 @@ void cpa_get_unwinder_stat(struct unwinder_stat *stat)
 	pthread_mutex_unlock(&unwind_stat_lock);
 }
 
+/*
+ * Samples captured before the exit can still be queued behind the
+ * unwinder loop. Free the per-pid unwinder state only after this grace
+ * period, so in-flight samples for the dying pid resolve against the
+ * context they were captured with instead of a freed/missing one.
+ */
+#define CPA_PID_EXIT_GRACE_NS (10ULL * 1000000000ULL)
+
 static void cpa_handle_pid_exit_events(unsigned long sample_ts)
 {
 	struct exit_event *exit_event = NULL;
@@ -649,7 +683,14 @@ static void cpa_handle_pid_exit_events(unsigned long sample_ts)
 	if (sample_ts == 0 || !gu_ctx)
 		return;
 
-	while ((exit_event = queue_peek(&pid_exit_queue)) != NULL && exit_event->exit_ts < sample_ts) {
+	/*
+	 * The exit queue is FIFO: stop at the first head that is not ripe
+	 * yet so later exits cannot overtake an earlier one's grace window.
+	 */
+	while ((exit_event = queue_peek(&pid_exit_queue)) != NULL) {
+		if (exit_event->exit_ts > sample_ts ||
+		    sample_ts - exit_event->exit_ts < CPA_PID_EXIT_GRACE_NS)
+			break;
 		exit_event = queue_pop(&pid_exit_queue);
 		gu_event_occur(gu_ctx, GU_EVENT_PROCESS_EXIT, &exit_event->pid);
 		free(exit_event);
@@ -756,6 +797,16 @@ static void cpa_unwind(struct stack_sample *sample)
 	if (sample->type & STACK_EVENT_IRQOFF) {
 		snprintf(irqoff_sample, sizeof(irqoff_sample), "<# IRQOFF SAMPLE ON CPU %d #>", sample->cpu);
 		cli_stackmap_append(trace_stackmap, irqoff_sample);
+		cli_stackmap_entry_reverse_ids(trace_stackmap);
+	}
+
+	if (sample->type & STACK_EVENT_COREDUMP) {
+		char coredump_sample[64];
+
+		snprintf(coredump_sample, sizeof(coredump_sample),
+			 "<# COREDUMP %s code=%d #>",
+			 cpa_signal_name(sample->signal), sample->signal_code);
+		cli_stackmap_append(trace_stackmap, coredump_sample);
 		cli_stackmap_entry_reverse_ids(trace_stackmap);
 	}
 
@@ -927,6 +978,7 @@ void cpa_unwind_main_worker_fn(void *worker_ctx)
 {
 	(void)worker_ctx;
 	struct stack_sample *sample = NULL;
+	unsigned int idle_sleep_us = CPA_UNWIND_IDLE_SLEEP_MIN_US;
 	while (1) {
 		pthread_mutex_lock(&stack_queue_lock);
 		sample = queue_pop(&stack_queue);
@@ -940,7 +992,8 @@ void cpa_unwind_main_worker_fn(void *worker_ctx)
 		 * responsive without spinning while there is no work to consume.
 		 */
 		cpa_check_restart_loop();
-		usleep(1000);
+		usleep(idle_sleep_us);
+		idle_sleep_us = cpa_unwinder_next_idle_sleep(idle_sleep_us);
 		if (should_stop())
 			break;
 	}

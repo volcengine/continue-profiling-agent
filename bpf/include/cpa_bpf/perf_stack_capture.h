@@ -16,7 +16,7 @@
 
 #define MAX_STACK_DEPTH 127
 #define MAX_USER_STACK_DUMP_SIZE (60 * 1024)
-#define PERF_STACK_CAPTURE_PAGE_CNT 64
+#define PERF_STACK_CAPTURE_PAGE_CNT 512
 
 /**
  * PERF stack capture event payload.

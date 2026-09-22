@@ -911,28 +911,42 @@ int is_cmd_available(const char *cmd)
 void set_fd_limit(int new_limit)
 {
 	struct rlimit lim;
+	rlim_t want;
 
 	if (getrlimit(RLIMIT_NOFILE, &lim) == -1) {
-		CLI_ERROR("getrlimit failed.");
-		exit(EXIT_FAILURE);
+		CLI_ERROR("getrlimit(RLIMIT_NOFILE) failed: %s", strerror(errno));
+		return;
 	}
 
-	CLI_OUTPUT("Current limits: soft = %ld, hard = %ld", lim.rlim_cur, lim.rlim_max);
+	/*
+	 * Raise the soft limit toward the requested value, but never above the
+	 * hard limit: a process without CAP_SYS_RESOURCE cannot increase the
+	 * hard limit, and setting rlim_max above the current hard cap makes
+	 * setrlimit() fail with EPERM. Global stack sampling opens one perf
+	 * event fd per CPU (plus mmap/epoll), so on many-core hosts the default
+	 * soft limit of 1024 is exhausted and perf_event_open() returns EMFILE,
+	 * leaving the profiler with no samples. Best-effort: never abort.
+	 */
+	want = (rlim_t)new_limit;
+	if (want > lim.rlim_max)
+		want = lim.rlim_max;
 
-	lim.rlim_cur = new_limit;
-	lim.rlim_max = new_limit;
+	if (want <= lim.rlim_cur) {
+		CLI_OUTPUT("RLIMIT_NOFILE already sufficient: soft=%ld hard=%ld",
+		   (long)lim.rlim_cur, (long)lim.rlim_max);
+		return;
+	}
 
+	lim.rlim_cur = want;
 	if (setrlimit(RLIMIT_NOFILE, &lim) == -1) {
-		CLI_ERROR("setrlimit failed.");
-		exit(EXIT_FAILURE);
+		CLI_ERROR("setrlimit(RLIMIT_NOFILE, soft=%ld hard=%ld) failed: %s",
+		  (long)lim.rlim_cur, (long)lim.rlim_max, strerror(errno));
+		return;
 	}
 
-	if (getrlimit(RLIMIT_NOFILE, &lim) == -1) {
-		CLI_ERROR("getrlimit failed.");
-		exit(EXIT_FAILURE);
-	}
-
-	CLI_OUTPUT("New limits: soft = %ld, hard = %ld", lim.rlim_cur, lim.rlim_max);
+	if (getrlimit(RLIMIT_NOFILE, &lim) == 0)
+		CLI_OUTPUT("RLIMIT_NOFILE raised: soft=%ld hard=%ld",
+		   (long)lim.rlim_cur, (long)lim.rlim_max);
 }
 
 int get_file_stat_info(const char *filename, struct file_info *info)

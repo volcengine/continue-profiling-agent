@@ -35,15 +35,72 @@ struct perf_event_epoll_ref {
 	struct list_head list;
 };
 
+enum bpf_event_backend {
+BPF_EVENT_BACKEND_PERFBUF = 0,
+BPF_EVENT_BACKEND_RINGBUF,
+};
+
 struct perf_event_handler_ctx {
 	int perf_map_fd;
-	struct perf_buffer *pb;
-	bpf_event_process_fn handler;
+	enum bpf_event_backend backend;
+union {
+struct perf_buffer *pb;
+struct ring_buffer *rb;
+};
+bpf_event_process_fn handler;
 	_Atomic unsigned int active_consumers;
 	_Atomic bool detaching;
 	struct perf_event_epoll_ref *ref;
 	struct list_head list;
 };
+
+static int bpf_event_buf_epoll_fd(const struct perf_event_handler_ctx *ctx)
+{
+return ctx->backend == BPF_EVENT_BACKEND_RINGBUF
+? ring_buffer__epoll_fd(ctx->rb)
+: perf_buffer__epoll_fd(ctx->pb);
+}
+
+struct perf_event_epoll_ref;
+static void perf_event_ctx_release_consumer(struct perf_event_handler_ctx *ctx);
+static struct perf_event_handler_ctx *perf_event_ctx_try_acquire(struct perf_event_epoll_ref *ref);
+
+static int bpf_event_buf_consume(const struct perf_event_handler_ctx *ctx)
+{
+return ctx->backend == BPF_EVENT_BACKEND_RINGBUF
+? ring_buffer__consume(ctx->rb)
+: perf_buffer__consume(ctx->pb);
+}
+
+static void bpf_event_buf_free(struct perf_event_handler_ctx *ctx)
+{
+if (ctx->backend == BPF_EVENT_BACKEND_RINGBUF)
+ring_buffer__free(ctx->rb);
+else
+perf_buffer__free(ctx->pb);
+ctx->rb = NULL;
+}
+
+static int __handle_ringbuf_event(void *cb_ctx, void *data, size_t size)
+{
+struct perf_event_handler_ctx *pb_ctx = cb_ctx;
+struct perf_event_handler_ctx *acquired;
+
+/*
+ * Acquire through the epoll ref exactly like the perf-buffer callback so
+ * unregister waits for an in-flight ringbuf event before freeing the
+ * ring_buffer and ctx.
+ */
+acquired = perf_event_ctx_try_acquire(pb_ctx->ref);
+if (!acquired)
+return 0;
+
+atomic_fetch_add_explicit(&g_inflight_events, 1, memory_order_acq_rel);
+pb_ctx->handler(data, (unsigned int)size, NULL);
+atomic_fetch_sub_explicit(&g_inflight_events, 1, memory_order_acq_rel);
+perf_event_ctx_release_consumer(acquired);
+return 0;
+}
 
 static void perf_event_ctx_release_consumer(struct perf_event_handler_ctx *ctx)
 {
@@ -121,7 +178,7 @@ static void *poll_event_thread(void *arg)
 				continue;
 			atomic_fetch_add_explicit(&g_inflight_events, 1, memory_order_acq_rel);
 
-			ret = perf_buffer__consume(pb_ctx->pb);
+			ret = bpf_event_buf_consume(pb_ctx);
 			atomic_fetch_sub_explicit(&g_inflight_events, 1, memory_order_acq_rel);
 			perf_event_ctx_release_consumer(pb_ctx);
 
@@ -205,10 +262,8 @@ void bpf_event_poll_destroy(void)
 	while (!list_empty(&pb_ctx_list)) {
 		ctx = list_first_entry(&pb_ctx_list, struct perf_event_handler_ctx, list);
 		list_del(&ctx->list);
-		if (ctx->pb) {
-			perf_buffer__free(ctx->pb);
-			ctx->pb = NULL;
-		}
+		if (ctx->pb || ctx->rb)
+			bpf_event_buf_free(ctx);
 		free(ctx);
 	}
 	while (!list_empty(&pb_ctx_ref_list)) {
@@ -266,6 +321,7 @@ int bpf_event_poll_register(int perf_map_fd, int page_cnt, bpf_event_process_fn 
 
 	ctx->handler = fn;
 	ctx->perf_map_fd = perf_map_fd;
+	ctx->backend = BPF_EVENT_BACKEND_PERFBUF;
 	ctx->ref = ref;
 
 	ctx->pb = perf_buffer__new(ctx->perf_map_fd, page_cnt, __handle_perf_event, __handle_lost_events, ctx, NULL);
@@ -287,19 +343,78 @@ int bpf_event_poll_register(int perf_map_fd, int page_cnt, bpf_event_process_fn 
 	event.events = EPOLLIN;
 	event.data.ptr = ref;
 
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, perf_buffer__epoll_fd(ctx->pb), &event) < 0) {
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, bpf_event_buf_epoll_fd(ctx), &event) < 0) {
 		BPF_ERR("failed to add perf buffer fd to epoll errno=%d\n", errno);
 		pthread_mutex_lock(&pb_ctx_list_lock);
 		list_del(&ctx->list);
 		list_del(&ref->list);
 		pthread_mutex_unlock(&pb_ctx_list_lock);
-		perf_buffer__free(ctx->pb);
-		free(ref);
-		free(ctx);
-		return -1;
-	}
+bpf_event_buf_free(ctx);
+free(ref);
+free(ctx);
+return -1;
+}
 
-	return 0;
+return 0;
+}
+
+int bpf_event_poll_register_ringbuf(int ring_map_fd, bpf_event_process_fn fn)
+{
+int epoll_fd = atomic_load_explicit(&g_epoll_fd, memory_order_acquire);
+struct perf_event_handler_ctx *ctx = NULL;
+struct perf_event_epoll_ref *ref = NULL;
+struct epoll_event event;
+struct ring_buffer *rb = NULL;
+
+if (atomic_load_explicit(&g_stop, memory_order_acquire) || epoll_fd == -1 ||
+!atomic_load_explicit(&g_poll_thread_started, memory_order_acquire) || !fn) {
+BPF_ERR("bpf_event_poll not init\n");
+return -1;
+}
+
+ctx = calloc(1, sizeof(*ctx));
+ref = calloc(1, sizeof(*ref));
+if (!ctx || !ref) {
+free(ctx);
+free(ref);
+return -1;
+}
+
+ctx->handler = fn;
+ctx->perf_map_fd = ring_map_fd;
+ctx->backend = BPF_EVENT_BACKEND_RINGBUF;
+ctx->ref = ref;
+atomic_init(&ctx->detaching, false);
+atomic_init(&ctx->active_consumers, 0);
+atomic_init(&ref->ctx, ctx);
+
+rb = ring_buffer__new(ring_map_fd, __handle_ringbuf_event, ctx, NULL);
+if (!rb) {
+BPF_ERR("failed to alloc ring buffer errno=%d\n", errno);
+free(ref);
+free(ctx);
+return -1;
+}
+ctx->rb = rb;
+
+pthread_mutex_lock(&pb_ctx_list_lock);
+list_add(&ctx->list, &pb_ctx_list);
+list_add(&ref->list, &pb_ctx_ref_list);
+pthread_mutex_unlock(&pb_ctx_list_lock);
+
+event.events = EPOLLIN;
+event.data.ptr = ref;
+if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ring_buffer__epoll_fd(rb), &event) < 0) {
+pthread_mutex_lock(&pb_ctx_list_lock);
+list_del(&ctx->list);
+list_del(&ref->list);
+pthread_mutex_unlock(&pb_ctx_list_lock);
+ring_buffer__free(rb);
+free(ref);
+free(ctx);
+return -1;
+}
+return 0;
 }
 
 void bpf_event_poll_detach_epoll(int perf_map_fd)
@@ -323,7 +438,7 @@ void bpf_event_poll_detach_epoll(int perf_map_fd)
 	}
 
 	if (found)
-		epoll_ctl(epoll_fd, EPOLL_CTL_DEL, perf_buffer__epoll_fd(ctx->pb), NULL);
+		epoll_ctl(epoll_fd, EPOLL_CTL_DEL, bpf_event_buf_epoll_fd(ctx), NULL);
 
 	pthread_mutex_unlock(&pb_ctx_list_lock);
 
@@ -356,8 +471,7 @@ void bpf_event_poll_unregister_buf(int perf_map_fd)
 			pthread_cond_wait(&pb_ctx_list_cond, &pb_ctx_list_lock);
 		}
 
-		perf_buffer__free(ctx->pb);
-		ctx->pb = NULL;
+		bpf_event_buf_free(ctx);
 		ctx->handler = NULL;
 		free(ctx);
 	}

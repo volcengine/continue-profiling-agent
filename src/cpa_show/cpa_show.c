@@ -213,6 +213,12 @@ static int cpa_show_render(void *ctx)
 	CLI_OUTPUT_NO_END("Record Time From [ %s ] to ", convert_millisecond_to_time(dump_info.start));
 	CLI_OUTPUT("[ %s ] Records Num: %d", convert_millisecond_to_time(dump_info.end), dump_info.record_count);
 
+	/* An empty store (no samples captured) is valid: report, don't error. */
+	if (dump_info.record_count == 0) {
+		CLI_OUTPUT("No profile records recorded in this store");
+		goto end;
+	}
+
 	if (show_range)
 		goto end;
 

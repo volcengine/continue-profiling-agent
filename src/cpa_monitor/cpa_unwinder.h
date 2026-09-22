@@ -42,6 +42,8 @@
  */
 struct stack_sample {
 	int type;
+	int signal;
+	int signal_code;
 
 	int state;
 	int cpu, pid;

@@ -146,7 +146,16 @@ int init_bpf(struct cpa_bpf_init_options *options)
 		return -1;
 	}
 
-	if (options->btf_path && !access(options->btf_path, R_OK)) {
+	/*
+ * The CLI defaults btf_path to the literal sentinels "null"/
+ * "/null"; only treat a real, readable path as custom BTF, otherwise
+ * a stray file named 'null' in the working directory would be handed to
+ * libbpf and break every CO-RE relocation.
+ */
+if (options->btf_path &&
+    strcmp(options->btf_path, "null") != 0 &&
+    strcmp(options->btf_path, "/null") != 0 &&
+    !access(options->btf_path, R_OK)) {
 		open_opts.btf_custom_path = strdup(options->btf_path);
 		user_defined_btf_path = true;
 		BPF_INFO("use user defined BTF: %s\n", options->btf_path);

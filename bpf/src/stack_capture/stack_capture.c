@@ -2,7 +2,12 @@
 // SPDX-FileCopyrightText: 2026 ByteDance
 
 #include <stack_capture.skel.h>
+#include <stack_capture_ringbuf.skel.h>
 #include <linux/perf_event.h>
+#include <pthread.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <asm/unistd.h>
 #include <stdint.h>
@@ -21,34 +26,121 @@
  */
 
 static struct stack_capture_bpf *obj;
+static struct stack_capture_ringbuf_bpf *rb_obj;
+static struct bpf_object *sc_obj;
+static bool use_ringbuf;
+/* 0 = auto, 1 = force perfbuf, 2 = force ringbuf. */
+static int datapath_requested;
+static unsigned int ring_size_bytes = 16U * 1024U * 1024U;
+
+void stack_capture_set_datapath(int mode, unsigned int ring_mb)
+{
+	datapath_requested = mode;
+	if (ring_mb)
+		ring_size_bytes = ring_mb * 1024U * 1024U;
+}
+
+static struct bpf_program *sc_prog(const char *name)
+{
+	return bpf_object__find_program_by_name(sc_obj, name);
+}
+
+static int sc_map_fd(const char *name)
+{
+	return bpf_map__fd(bpf_object__find_map_by_name(sc_obj, name));
+}
 static int perf_output_events, percpu_config, stack_content_buf;
+static int kernel_event_buf;
+static int comm_stack_limit_fd = -1;
+static pthread_mutex_t comm_stack_limit_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct stack_capture_comm_key *comm_stack_limit_keys = NULL;
+static unsigned int comm_stack_limit_key_count = 0;
 struct stack_capture_config *percpu_config_buf = NULL;
 
 char *cpu_array_buf = NULL;
 
 static struct bpf_link **links = NULL;
 static struct bpf_link *probe_links = NULL;
+static struct bpf_link *coredump_link = NULL;
+static bool coredump_capture_enabled = false;
+
+void stack_capture_set_coredump_capture(bool enabled)
+{
+	coredump_capture_enabled = enabled;
+}
 
 /* Shared BPF runtime handles and buffers. */
 static int stack_capture_size = 8192;
 
+static bool ringbuf_map_supported(void)
+{
+return libbpf_probe_bpf_map_type(BPF_MAP_TYPE_RINGBUF, NULL) > 0;
+}
+
+static void sc_preload_resize(struct bpf_object *bo, bool ring)
+{
+	bpf_map__set_max_entries(
+		bpf_object__find_map_by_name(bo, "stack_content_buf"),
+		libbpf_num_possible_cpus());
+	bpf_map__set_max_entries(
+		bpf_object__find_map_by_name(bo, "kernel_event_buf"),
+		libbpf_num_possible_cpus());
+	if (ring)
+		bpf_map__set_max_entries(
+			bpf_object__find_map_by_name(bo, "events_rb"),
+			ring_size_bytes);
+}
+
 static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 {
-	int ret;
+	bool try_ringbuf = datapath_requested == 2 ||
+			   (datapath_requested == 0 && ringbuf_map_supported());
 
-	obj = stack_capture_bpf__open_opts(optsp);
-	if (!obj) {
-		BPF_ERR("bpf open failed func=%s\n", __func__);
-		return -1;
+	if (try_ringbuf) {
+		rb_obj = stack_capture_ringbuf_bpf__open_opts(optsp);
+		if (!rb_obj) {
+			if (datapath_requested == 2) {
+				BPF_ERR("ringbuf bpf open failed func=%s\n", __func__);
+				return -1;
+			}
+			BPF_INFO("ringbuf open failed, falling back to perf buffer\n");
+		} else {
+			sc_preload_resize(rb_obj->obj, true);
+			if (!coredump_capture_enabled)
+				bpf_program__set_autoload(
+					rb_obj->progs.stack_capture_coredump, false);
+			int ret = stack_capture_ringbuf_bpf__load(rb_obj);
+			if (ret) {
+				stack_capture_ringbuf_bpf__destroy(rb_obj);
+				rb_obj = NULL;
+				if (datapath_requested == 2) {
+					BPF_ERR("ringbuf bpf load failed ret=%d\n", ret);
+					return ret;
+				}
+				BPF_INFO("ringbuf load failed ret=%d, falling back\n", ret);
+			} else {
+				use_ringbuf = true;
+			}
+		}
 	}
 
-	bpf_map__set_max_entries(bpf_object__find_map_by_name(obj->obj, "stack_content_buf"), libbpf_num_possible_cpus());
-
-	ret = stack_capture_bpf__load(obj);
-	if (ret) {
-		BPF_ERR("bpf load failed func=%s\n", __func__);
-		return ret;
+	if (!use_ringbuf) {
+		obj = stack_capture_bpf__open_opts(optsp);
+		if (!obj) {
+			BPF_ERR("bpf open failed func=%s\n", __func__);
+			return -1;
+		}
+		sc_preload_resize(obj->obj, false);
+		if (!coredump_capture_enabled)
+			bpf_program__set_autoload(obj->progs.stack_capture_coredump, false);
+		int ret = stack_capture_bpf__load(obj);
+		if (ret) {
+			BPF_ERR("bpf load failed func=%s\n", __func__);
+			return ret;
+		}
 	}
+
+	sc_obj = use_ringbuf ? rb_obj->obj : obj->obj;
 
 	links = (struct bpf_link **)calloc(libbpf_num_possible_cpus(), sizeof(struct bpf_link *));
 	if (!links) {
@@ -56,9 +148,15 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 		return -1;
 	}
 
-	stack_content_buf = bpf_map__fd(obj->maps.stack_content_buf);
-	perf_output_events = bpf_map__fd(obj->maps.perf_output_events);
-	percpu_config = bpf_map__fd(obj->maps.percpu_config);
+	stack_content_buf = sc_map_fd("stack_content_buf");
+	kernel_event_buf = sc_map_fd("kernel_event_buf");
+	comm_stack_limit_fd = sc_map_fd("comm_stack_limit");
+	percpu_config = sc_map_fd("percpu_config");
+	perf_output_events = use_ringbuf ? sc_map_fd("events_rb")
+				       : sc_map_fd("perf_output_events");
+	BPF_INFO("stack_capture datapath=%s ring_size=%u\n",
+		 use_ringbuf ? "ringbuf" : "perfbuf",
+		 use_ringbuf ? ring_size_bytes : 0);
 	return 0;
 }
 
@@ -70,6 +168,12 @@ static void exit_bpf_module(void)
 	int i = 0;
 	if (!obj)
 		return;
+
+	(void)stack_capture_clear_comm_stack_limits();
+	free(comm_stack_limit_keys);
+	comm_stack_limit_keys = NULL;
+	comm_stack_limit_key_count = 0;
+	comm_stack_limit_fd = -1;
 
 	if (links) {
 		for (i = 0; i < libbpf_num_possible_cpus(); i++) {
@@ -86,7 +190,16 @@ static void exit_bpf_module(void)
 	if (percpu_config_buf)
 		free(percpu_config_buf);
 
-	bpf_event_poll_unregister(perf_output_events, stack_capture_bpf__destroy(obj));
+	if (use_ringbuf) {
+bpf_event_poll_unregister_no_free(perf_output_events);
+stack_capture_ringbuf_bpf__destroy(rb_obj);
+rb_obj = NULL;
+} else {
+bpf_event_poll_unregister(perf_output_events, stack_capture_bpf__destroy(obj));
+}
+sc_obj = NULL;
+use_ringbuf = false;
+
 
 	obj = NULL;
 }
@@ -153,7 +266,7 @@ int set_stack_capture_size(int size)
 	return 0;
 }
 
-static struct bpf_link *attach_by_name(struct stack_capture_bpf *obj, const char *probe_type)
+static struct bpf_link *attach_by_name(const char *probe_type)
 {
 	char *probe_spec = NULL;
 	char *probe_type_name = NULL;
@@ -162,7 +275,7 @@ static struct bpf_link *attach_by_name(struct stack_capture_bpf *obj, const char
 	char *saveptr = NULL;
 	struct bpf_link *link = NULL;
 
-	if (!obj || !probe_type) {
+	if (!probe_type) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -178,15 +291,15 @@ static struct bpf_link *attach_by_name(struct stack_capture_bpf *obj, const char
 	if (strcmp(probe_type_name, "kprobe") == 0) {
 		if (!probe_target)
 			goto err;
-		link = bpf_program__attach_kprobe(obj->progs.stack_capture_kprobe, false, probe_target);
+		link = bpf_program__attach_kprobe(sc_prog("stack_capture_kprobe"), false, probe_target);
 	} else if (strcmp(probe_type_name, "kretprobe") == 0) {
 		if (!probe_target)
 			goto err;
-		link = bpf_program__attach_kprobe(obj->progs.stack_capture_kprobe, true, probe_target);
+		link = bpf_program__attach_kprobe(sc_prog("stack_capture_kprobe"), true, probe_target);
 	} else if (strcmp(probe_type_name, "tracepoint") == 0) {
 		if (!probe_target || !probe_subtype)
 			goto err;
-		link = bpf_program__attach_tracepoint(obj->progs.stack_capture_tp, probe_target, probe_subtype);
+		link = bpf_program__attach_tracepoint(sc_prog("stack_capture_tp"), probe_target, probe_subtype);
 	} else {
 		errno = ENOTSUP;
 		goto err;
@@ -198,7 +311,115 @@ err:
 }
 
 #define USER_CAPTURE_PAGE_CNT 512
-#define KERNEL_CAPTURE_PAGE_CNT 2
+/*
+ * Kernel-only events carry the fixed stack_event header (~2 KiB of
+ * kernel stack); two pages only buffer two or three samples per CPU at
+ * 99 Hz, so use four to avoid overwrite drops in kernel-only mode.
+ */
+#define KERNEL_CAPTURE_PAGE_CNT 4
+
+static int stack_capture_build_comm_key(const char *comm,
+				  struct stack_capture_comm_key *key)
+{
+	size_t len;
+
+	if (!comm || !key)
+		return -EINVAL;
+
+	len = strnlen(comm, sizeof(key->comm));
+	if (len == 0)
+		return -EINVAL;
+
+	memset(key, 0, sizeof(*key));
+	memcpy(key->comm, comm, len);
+	return 0;
+}
+
+static int stack_capture_find_comm_key_locked(const struct stack_capture_comm_key *key)
+{
+	for (unsigned int i = 0; i < comm_stack_limit_key_count; i++)
+		if (memcmp(&comm_stack_limit_keys[i], key, sizeof(*key)) == 0)
+			return (int)i;
+	return -1;
+}
+
+int stack_capture_set_comm_stack_limit(const char *comm, unsigned int stack_size)
+{
+	struct stack_capture_comm_key key;
+	bool is_new = false;
+	int err;
+
+	if (!obj || comm_stack_limit_fd < 0)
+		return -ENOENT;
+	if (stack_size != 0 &&
+	    (stack_size < 4096 || stack_size > MAX_STACK_EVENT_USER_STACK_SIZE ||
+		     stack_size % 4096 != 0))
+		return -EINVAL;
+
+	err = stack_capture_build_comm_key(comm, &key);
+	if (err)
+		return err;
+
+	pthread_mutex_lock(&comm_stack_limit_lock);
+	if (stack_capture_find_comm_key_locked(&key) < 0) {
+		struct stack_capture_comm_key *grown = NULL;
+
+		if (comm_stack_limit_key_count >= STACK_CAPTURE_COMM_LIMIT_MAX_ENTRIES) {
+			err = -ENOSPC;
+			goto out;
+		}
+		grown = realloc(comm_stack_limit_keys,
+			       (comm_stack_limit_key_count + 1) * sizeof(*grown));
+		if (!grown) {
+			err = -ENOMEM;
+			goto out;
+		}
+		comm_stack_limit_keys = grown;
+		comm_stack_limit_keys[comm_stack_limit_key_count++] = key;
+		is_new = true;
+	}
+	if (bpf_map_update_elem(comm_stack_limit_fd, &key, &stack_size, BPF_ANY) != 0) {
+		err = -errno;
+		if (is_new)
+			comm_stack_limit_key_count--;
+		goto out;
+	}
+	err = 0;
+out:
+	pthread_mutex_unlock(&comm_stack_limit_lock);
+	return err;
+}
+
+int stack_capture_clear_comm_stack_limits(void)
+{
+	int err = 0;
+
+	pthread_mutex_lock(&comm_stack_limit_lock);
+	if (obj && comm_stack_limit_fd >= 0) {
+		for (unsigned int i = 0; i < comm_stack_limit_key_count; i++) {
+			if (bpf_map_delete_elem(comm_stack_limit_fd,
+						&comm_stack_limit_keys[i]) != 0 &&
+			    errno != ENOENT && err == 0)
+				err = -errno;
+		}
+	}
+	comm_stack_limit_key_count = 0;
+	pthread_mutex_unlock(&comm_stack_limit_lock);
+	return err;
+}
+
+int stack_capture_get_comm_stack_limit_stat(struct stack_capture_comm_limit_stat *stat)
+{
+	if (!stat)
+		return -EINVAL;
+
+	memset(stat, 0, sizeof(*stat));
+	stat->capacity = STACK_CAPTURE_COMM_LIMIT_MAX_ENTRIES;
+	pthread_mutex_lock(&comm_stack_limit_lock);
+	stat->entries = comm_stack_limit_key_count;
+	pthread_mutex_unlock(&comm_stack_limit_lock);
+	return 0;
+}
 
 /**
  * Setup stack capture map/program and attach either explicit probe or CPU timers.
@@ -231,13 +452,21 @@ int setup_stack_capture_event(int freq, bpf_event_process_fn fn, struct stack_ca
 	 * Kernel-only mode sends much smaller events, so use a smaller perf
 	 * buffer to reduce idle memory while keeping user-stack mode roomy.
 	 */
-	if (bpf_event_poll_register(perf_output_events, page_cnt, fn) < 0) {
+	int poll_ret = use_ringbuf ?
+bpf_event_poll_register_ringbuf(perf_output_events, fn) :
+bpf_event_poll_register(perf_output_events, page_cnt, fn);
+if (poll_ret < 0) {
 		BPF_ERR("failed to register\n");
 		err = -1;
 		goto clear;
 	}
 
-	int array_buf_size = STACK_EVENT_MAX_PAYLOAD;
+	/*
+	 * Kernel-only mode uses the fixed-size per-CPU event buffer; user
+	 * stack mode needs the full payload-sized scratch buffer.
+	 */
+	int array_buf_size = user_ctx->only_kernel ? (int)sizeof(struct stack_event) : STACK_EVENT_MAX_PAYLOAD;
+	int content_map_fd = user_ctx->only_kernel ? kernel_event_buf : stack_content_buf;
 
 	cpu_array_buf = calloc(libbpf_num_possible_cpus(), array_buf_size);
 	if (!cpu_array_buf) {
@@ -245,11 +474,11 @@ int setup_stack_capture_event(int freq, bpf_event_process_fn fn, struct stack_ca
 		err = -ENOMEM;
 		goto clear;
 	}
-	memset(cpu_array_buf, 1, array_buf_size * libbpf_num_possible_cpus());
+	memset(cpu_array_buf, 0, array_buf_size * libbpf_num_possible_cpus());
 	char *cpu_array_buf_ptr = cpu_array_buf;
 
 	for (i = 0; i < libbpf_num_possible_cpus(); i++) {
-		bpf_map_update_elem(stack_content_buf, &i, cpu_array_buf_ptr, 0);
+		bpf_map_update_elem(content_map_fd, &i, cpu_array_buf_ptr, 0);
 		cpu_array_buf_ptr += array_buf_size;
 	}
 
@@ -261,7 +490,8 @@ int setup_stack_capture_event(int freq, bpf_event_process_fn fn, struct stack_ca
 	}
 
 	struct stack_capture_config config;
-	config.only_kernel = user_ctx->only_kernel;
+config.only_kernel = user_ctx->only_kernel;
+	config.bpf_exec_time_guard_ns = user_ctx->bpf_exec_time_guard_ns;
 
 	if (setup_stack_capture_config(&config, threshold_ns)) {
 		BPF_ERR("failed to setup stack_capture_config\n");
@@ -303,7 +533,7 @@ int setup_stack_capture_event(int freq, bpf_event_process_fn fn, struct stack_ca
 	}
 
 	if (user_ctx->probe_name) {
-		probe_links = attach_by_name(obj, user_ctx->probe_name);
+		probe_links = attach_by_name(user_ctx->probe_name);
 		if (!probe_links) {
 			BPF_ERR("failed to attach %s\n", user_ctx->probe_name);
 			err = -ENOENT;
@@ -321,10 +551,22 @@ int setup_stack_capture_event(int freq, bpf_event_process_fn fn, struct stack_ca
 			err = -errno;
 			goto clear;
 		}
-		links[i] = bpf_program__attach_perf_event(obj->progs.stack_capture_timer, fd);
+		links[i] = bpf_program__attach_perf_event(sc_prog("stack_capture_timer"), fd);
 		if (!links[i]) {
 			BPF_ERR("failed to attach perf event cpu=%d errno=%d\n", i, errno);
 			close(fd);
+			err = -errno;
+			if (!err)
+				err = -EIO;
+			goto clear;
+		}
+	}
+
+	if (coredump_capture_enabled) {
+		coredump_link = bpf_program__attach_kprobe(
+			sc_prog("stack_capture_coredump"), false, "do_coredump");
+		if (!coredump_link) {
+			BPF_ERR("failed to attach kprobe/do_coredump errno=%d\n", errno);
 			err = -errno;
 			if (!err)
 				err = -EIO;

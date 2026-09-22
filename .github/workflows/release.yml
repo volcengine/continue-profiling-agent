@@ -15,9 +15,17 @@ permissions:
   contents: write
 
 jobs:
-  linux-x86_64:
-    name: linux x86_64 portable package
-    runs-on: ubuntu-24.04
+  linux-package:
+    name: linux ${{ matrix.arch }} portable package
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     env:
       CPA_BPF_LLVM_VERSION: "18"
     steps:
@@ -64,6 +72,7 @@ jobs:
         run: |
           cmake --version
           gcc --version | head -n1
+          uname -m
           /usr/lib/llvm-${CPA_BPF_LLVM_VERSION}/bin/clang --version | head -n1
           /usr/lib/llvm-${CPA_BPF_LLVM_VERSION}/bin/llvm-strip --version | head -n1
           /usr/lib/llvm-${CPA_BPF_LLVM_VERSION}/bin/llvm-objdump --version | head -n1
@@ -83,10 +92,11 @@ jobs:
       - name: Smoke test package
         run: |
           mkdir -p dist
-          cp build/bin/cpa_portable dist/cpa_portable-linux-x86_64
-          chmod 0755 dist/cpa_portable-linux-x86_64
-          dist/cpa_portable-linux-x86_64 version
-          sha256sum dist/cpa_portable-linux-x86_64 > dist/cpa_portable-linux-x86_64.sha256
+          cp build/bin/cpa_portable dist/cpa_portable-linux-${{ matrix.arch }}
+          chmod 0755 dist/cpa_portable-linux-${{ matrix.arch }}
+          dist/cpa_portable-linux-${{ matrix.arch }} version
+          sha256sum dist/cpa_portable-linux-${{ matrix.arch }} > dist/cpa_portable-linux-${{ matrix.arch }}.sha256
+          file dist/cpa_portable-linux-${{ matrix.arch }} || true
 
       - name: Publish GitHub release
         env:
@@ -95,14 +105,14 @@ jobs:
         run: |
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             gh release upload "${RELEASE_TAG}" \
-              dist/cpa_portable-linux-x86_64 \
-              dist/cpa_portable-linux-x86_64.sha256 \
+              dist/cpa_portable-linux-${{ matrix.arch }} \
+              dist/cpa_portable-linux-${{ matrix.arch }}.sha256 \
               --clobber
           else
             gh release create "${RELEASE_TAG}" \
-              dist/cpa_portable-linux-x86_64 \
-              dist/cpa_portable-linux-x86_64.sha256 \
+              dist/cpa_portable-linux-${{ matrix.arch }} \
+              dist/cpa_portable-linux-${{ matrix.arch }}.sha256 \
               --verify-tag \
               --title "continue-profiling-agent ${RELEASE_TAG}" \
-              --notes "Portable Linux x86_64 CPA package built with SOPacker."
+              --notes "Portable Linux ${{ matrix.arch }} CPA package built with SOPacker."
           fi

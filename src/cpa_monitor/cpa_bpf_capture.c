@@ -12,6 +12,9 @@
 #include "cli_common.h"
 #include "cpa_unwinder.h"
 #include "cpa_drop_policy.h"
+#include <stdlib.h>
+#include <errno.h>
+#include "stack_capture.h"
 #include "cli_counter_helper.h"
 
 /**
@@ -211,6 +214,8 @@ static struct stack_sample *stack_sample_kernel_build(struct stack_event *event,
 		return NULL;
 
 	sample->type = event->type;
+	sample->signal = event->signal;
+	sample->signal_code = event->signal_code;
 	sample->user_mode = event->user_mode;
 	fill_sample_kstack(sample, event);
 
@@ -244,6 +249,8 @@ static struct stack_sample *stack_sample_build(struct stack_event *e, const char
 	}
 
 	sample->type = e->type;
+	sample->signal = e->signal;
+	sample->signal_code = e->signal_code;
 	sample->timestamp = e->timestamp;
 	sample->user_mode = e->user_mode;
 	fill_sample_kstack(sample, e);
@@ -285,6 +292,25 @@ static struct stack_sample *stack_sample_build(struct stack_event *e, const char
 }
 
 pthread_mutex_t bpf_exec_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Configured BPF per-sample execution-time budget in nanoseconds. */
+static unsigned long long bpf_exec_time_guard_ns = 0;
+static atomic_bool slow_comm_limit_failure_reported = false;
+
+static void cpa_bpf_exec_time_guard_limit_slow_comm(const struct stack_event *e)
+{
+	if (!(e->type & STACK_EVENT_COMMON) ||
+	    e->stack_size <= STACK_CAPTURE_DEFAULT_COMM_STACK_LIMIT_SIZE)
+		return;
+
+	if (stack_capture_set_comm_stack_limit(
+		    (const char *)e->comm,
+		    STACK_CAPTURE_DEFAULT_COMM_STACK_LIMIT_SIZE) != 0 &&
+	    !atomic_exchange_explicit(&slow_comm_limit_failure_reported,
+					 true, memory_order_relaxed))
+		CLI_ERROR("Failed to set slow comm stack limit comm=%.16s limit=%d",
+			  e->comm, STACK_CAPTURE_DEFAULT_COMM_STACK_LIMIT_SIZE);
+}
 
 static void cpa_bpf_exec_counter_destroy(void)
 {
@@ -358,6 +384,11 @@ static void stack_capture_event_process(void *event, unsigned int size, void *us
 		cli_counter_add(bpf_exec_counter, e->bpf_exec_time);
 	pthread_mutex_unlock(&bpf_exec_counter_mutex);
 
+	/* A user-stack copy that overran the budget gets the comm throttled. */
+	if (bpf_exec_time_guard_ns != 0 &&
+	    e->bpf_exec_time > bpf_exec_time_guard_ns)
+		cpa_bpf_exec_time_guard_limit_slow_comm(e);
+
 	if (kernel_only_fastpath) {
 		if (!kernel_only_fastpath_enter())
 			goto out;
@@ -394,10 +425,13 @@ static void exit_event_process(void *event, unsigned int sz, void *user_ctx)
 {
 	struct exit_event *e = NULL;
 
-	(void)sz;
 	(void)user_ctx;
 	if (!capture_callback_enter())
 		return;
+
+	/* A truncated perf record must never be dereferenced as a full event. */
+	if (sz < sizeof(struct process_exit_event))
+		goto out;
 
 	e = malloc(sizeof(struct exit_event));
 	if (!e)
@@ -463,6 +497,38 @@ static int cpa_bpf_oncpu_capture_init(void *ctx)
 		return CPA_INIT_FAILED;
 	}
 
+	bool coredump_enabled = atoi(get_arg_by_name(ctx, "enable_coredump_capture")) != 0;
+	stack_capture_set_coredump_capture(coredump_enabled);
+	const char *datapath = get_arg_by_name(ctx, "datapath");
+	int datapath_mode = 0;
+	if (datapath && !cli_arg_is_null_default(datapath)) {
+		if (!strcmp(datapath, "perfbuf"))
+			datapath_mode = 1;
+		else if (!strcmp(datapath, "ringbuf"))
+			datapath_mode = 2;
+		else if (strcmp(datapath, "auto")) {
+			CLI_ERROR("Invalid datapath=%s (auto|perfbuf|ringbuf)", datapath);
+			return CPA_INIT_FAILED;
+		}
+	}
+	const char *ring_mb_str = get_arg_by_name(ctx, "ring_size_mb");
+	unsigned int ring_mb = 0;
+	if (ring_mb_str && ring_mb_str[0] != '\0' &&
+	    strcmp(ring_mb_str, "null") != 0) {
+		char *ring_end = NULL;
+		unsigned long ring_val;
+
+		errno = 0;
+		ring_val = strtoul(ring_mb_str, &ring_end, 10);
+		if (errno || ring_end == ring_mb_str || *ring_end != '\0' ||
+		    ring_val == 0 || ring_val > 1024) {
+			CLI_ERROR("Invalid ring_size_mb=%s (integer in [1,1024] MiB)", ring_mb_str);
+			return CPA_INIT_FAILED;
+		}
+		ring_mb = (unsigned int)ring_val;
+	}
+	stack_capture_set_datapath(datapath_mode, ring_mb);
+
 	if (INIT_MODULE_BPF(stack_capture))
 		return CPA_INIT_FAILED;
 
@@ -486,6 +552,27 @@ static int cpa_bpf_oncpu_capture_init(void *ctx)
 	if (!cli_arg_is_null_default(comm))
 		snprintf(stack_capture_init_ctx.comm, sizeof(stack_capture_init_ctx.comm), "%s", comm);
 
+{
+	const char *guard_ms_str = get_arg_by_name(ctx, "bpf_exec_time_guard_ms");
+	unsigned long long guard_ms = 0;
+
+	if (guard_ms_str && guard_ms_str[0] != '\0' &&
+	    strcmp(guard_ms_str, "null") != 0) {
+		char *end = NULL;
+
+		errno = 0;
+		guard_ms = strtoull(guard_ms_str, &end, 10);
+		if (errno || end == guard_ms_str || *end != '\0') {
+			CLI_ERROR("Invalid bpf_exec_time_guard_ms=%s", guard_ms_str);
+			DISABLE_MODULE_BPF(stack_capture);
+			free(probe);
+			return CPA_INIT_FAILED;
+		}
+	}
+	bpf_exec_time_guard_ns = guard_ms * 1000ULL * 1000ULL;
+}
+	stack_capture_init_ctx.bpf_exec_time_guard_ns = bpf_exec_time_guard_ns;
+stack_capture_init_ctx.enable_coredump_capture = coredump_enabled;
 	stack_capture_init_ctx.only_kernel = kernel_only_fastpath;
 	stack_capture_init_ctx.pid = bpf_capture_config.pid;
 

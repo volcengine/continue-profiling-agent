@@ -281,8 +281,10 @@ def test_cpa_show_handle_empty_stack_bin(tmp_path):
         ]
     )
 
-    assert return_code != 0
-    assert "no valid records" in (stderr + stdout).lower()
+    # Empty stores (e.g. a rotation window with no samples) report zero
+    # records successfully instead of failing.
+    assert return_code == 0
+    assert "no profile records recorded" in (stderr + stdout).lower()
 
 
 def test_cpa_show_rejects_missing_store_dir(tmp_path):

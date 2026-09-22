@@ -109,7 +109,9 @@ int cli_zstd_write_done(ZSTDStream *stream)
 		size_t remaining = ZSTD_compressStream(stream->cstream, &output, &input);
 		if (ZSTD_isError(remaining))
 			return 1;
-		fwrite(stream->outputBuffer, 1, output.pos, stream->outFile);
+		if (fwrite(stream->outputBuffer, 1, output.pos, stream->outFile) !=
+		    output.pos)
+			return -1;
 	}
 	stream->inputSize = 0;
 	return 0;
@@ -117,10 +119,20 @@ int cli_zstd_write_done(ZSTDStream *stream)
 
 int cli_zstd_flush(ZSTDStream *stream)
 {
-	ZSTD_outBuffer output = { stream->outputBuffer, CHUNK_SIZE, 0 };
-	ZSTD_endStream(stream->cstream, &output);
-	fwrite(output.dst, 1, output.pos, stream->outFile);
-	fflush(stream->outFile);
+	size_t remaining;
+
+	do {
+		ZSTD_outBuffer output = { stream->outputBuffer, CHUNK_SIZE, 0 };
+
+		remaining = ZSTD_endStream(stream->cstream, &output);
+		if (ZSTD_isError(remaining))
+			return -1;
+		if (fwrite(output.dst, 1, output.pos, stream->outFile) !=
+		    output.pos)
+			return -1;
+	} while (remaining != 0);
+	if (fflush(stream->outFile) != 0)
+		return -1;
 	return 0;
 }
 
@@ -142,20 +154,54 @@ ZSTDStream *cli_stackmap_change_zstd_file(ZSTDStream *oldStream, const char *new
 
 char *cli_zstd_decompress_file(const char *file_name, int use_cache)
 {
-	char outFolderPath[256];
-	char outFilePath[256];
-	char *slash = strrchr(file_name, '/');
+	const char *slash = NULL;
+	const char *basename = NULL;
+	char *parent_path = NULL;
+	char *out_folder_path = NULL;
+	char *out_file_path = NULL;
 	int success = 0;
 	FILE *fin = NULL, *fout = NULL;
 	void *buffIn = NULL, *buffOut = NULL;
 	ZSTD_DStream *dstream = NULL;
 
-	snprintf(outFolderPath, sizeof(outFolderPath), "%.*s/decompressed", (int)(slash - file_name + 1), file_name);
-	snprintf(outFilePath, sizeof(outFilePath), "%s/%s", outFolderPath, slash + 1);
+	if (!file_name || !file_name[0]) {
+		CLI_ERROR("Invalid input file path");
+		goto free;
+	}
 
-	create_directory_if_notexist(outFolderPath);
+	slash = strrchr(file_name, '/');
+	if (!slash || !slash[1]) {
+		CLI_ERROR("Input file path must include a basename");
+		goto free;
+	}
+	basename = slash + 1;
 
-	if (access(outFilePath, F_OK) == 0 && use_cache) {
+	size_t parent_len = slash - file_name;
+	if (parent_len == 0) {
+		parent_path = strdup("/");
+	} else {
+		parent_path = malloc(parent_len + 1);
+		if (parent_path) {
+			memcpy(parent_path, file_name, parent_len);
+			parent_path[parent_len] = '\0';
+		}
+	}
+	if (!parent_path) {
+		CLI_ERROR("Failed to allocate parent path");
+		goto free;
+	}
+
+	out_folder_path = path_join(parent_path, "decompressed");
+	if (!out_folder_path)
+		goto free;
+
+	out_file_path = path_join(out_folder_path, basename);
+	if (!out_file_path)
+		goto free;
+
+	create_directory_if_notexist(out_folder_path);
+
+	if (access(out_file_path, F_OK) == 0 && use_cache) {
 		success = 1;
 		goto free;
 	}
@@ -163,14 +209,13 @@ char *cli_zstd_decompress_file(const char *file_name, int use_cache)
 	fin = fopen(file_name, "rb");
 	if (fin == NULL) {
 		CLI_ERROR("Failed to open input file");
-		return NULL;
+		goto free;
 	}
 
-	fout = fopen(outFilePath, "wb");
+	fout = fopen(out_file_path, "wb");
 	if (fout == NULL) {
 		CLI_ERROR("Failed to open output file");
-		fclose(fin);
-		return NULL;
+		goto free;
 	}
 
 	size_t const buffInSize = ZSTD_DStreamInSize();
@@ -221,7 +266,10 @@ free:
 		free(buffOut);
 	if (dstream)
 		ZSTD_freeDStream(dstream);
+	free(parent_path);
+	free(out_folder_path);
 	if (success)
-		return strdup(outFilePath);
+		return out_file_path;
+	free(out_file_path);
 	return NULL;
 }

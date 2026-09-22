@@ -10,6 +10,16 @@
 
 #define DEFAULT_IDS_LEN 16
 
+/*
+ * Upper bound for a single interned frame string. Sampled frames are
+ * formatted into fixed-size buffers, but proc-stack lines and corrupted
+ * runtime symbols can hand us pathologically long text. The cap must stay
+ * below the zstd staging buffer (CHUNK_SIZE, 16384 bytes) so a frame can
+ * always be staged in one piece; a longer string corrupts the zstd writer's
+ * size accounting and can wedge the saver.
+ */
+#define CLI_STACKMAP_FRAME_MAX_LEN 8192
+
 struct cli_stackmap_entry *cli_stackmap_entry_init(void)
 {
 	struct cli_stackmap_entry *entry = calloc(1, sizeof(struct cli_stackmap_entry));
@@ -251,28 +261,55 @@ int cli_stackmap_append(struct cli_stackmap *map, const char *stack)
 {
 	struct str_hash *s;
 	int ret = 0;
+	size_t stack_len;
+	char *bounded = NULL;
+	const char *key;
 
 	if (!map) {
 		CLI_ERROR("input map is NULL\n");
+		return -1;
+	}
+	if (!stack) {
+		CLI_ERROR("input stack is NULL\n");
 		return -1;
 	}
 
 	if (!map->record_start_time)
 		map->record_start_time = get_current_ms() - map->day_start;
 
-	HASH_FIND_STR(map->str_hash, stack, s);
+	stack_len = strnlen(stack, CLI_STACKMAP_FRAME_MAX_LEN);
+	if (stack_len == CLI_STACKMAP_FRAME_MAX_LEN) {
+		bounded = strndup(stack, stack_len);
+		if (!bounded) {
+			CLI_ERROR("strndup bounded frame failed\n");
+			return -1;
+		}
+		key = bounded;
+	} else {
+		key = stack;
+	}
+
+	HASH_FIND(hh, map->str_hash, key, stack_len, s);
 	if (!s) {
 		s = calloc(1, sizeof(struct str_hash));
 		if (!s) {
 			CLI_ERROR("malloc str_hash failed\n");
+			free(bounded);
 			return -1;
 		}
 
-		s->str = strdup(stack);
-		map->usage->memory_usage_strmap += strlen(stack) + sizeof(struct str_hash);
+		s->str = bounded ? bounded : strdup(stack);
+		if (!s->str) {
+			CLI_ERROR("strdup frame failed\n");
+			free(s);
+			free(bounded);
+			return -1;
+		}
+		bounded = NULL; /* stolen into s->str */
+		map->usage->memory_usage_strmap += stack_len + sizeof(struct str_hash);
 		s->id = map->str_id++;
 
-		HASH_ADD_KEYPTR(hh, map->str_hash, s->str, strlen(s->str), s);
+		HASH_ADD_KEYPTR(hh, map->str_hash, s->str, stack_len, s);
 
 		if (s->id >= map->str_hash_maxlen) {
 			pthread_mutex_lock(&map->strmap_lock);
@@ -292,6 +329,8 @@ int cli_stackmap_append(struct cli_stackmap *map, const char *stack)
 
 		map->str_hash_by_id[s->id] = s;
 	}
+
+	free(bounded);
 
 	ret = cli_stackmap_entry_append_id(map, map->current, s->id);
 	if (ret) {
@@ -839,6 +878,7 @@ int cli_stackmap_fetch_dump_info(const char *dir_name, struct stackmap_dump_info
 	uint64_t record_count;
 	uint64_t file_offset = 0;
 	size_t record_capacity = 16;
+	bool is_guard_record = false;
 
 	/*
 	 * Parsing is footer-driven: after each header section, seek to the
@@ -870,12 +910,20 @@ int cli_stackmap_fetch_dump_info(const char *dir_name, struct stackmap_dump_info
 			goto failed;
 		}
 
-		if (dump_info->record_count == 0) {
+		/*
+		 * A zero-count record with start == end is an interval guard
+		 * (empty flush / timewheel sentinel), not a real profile record.
+		 */
+		is_guard_record = record_count == 0 && starttime == endtime;
+		if (!is_guard_record && dump_info->record_count == 0)
 			dump_info->start = starttime;
-		}
-		if (endtime < dump_info->start)
+
+		if (dump_info->start && endtime < dump_info->start)
 			endtime += 86400 * 1000;
 		dump_info->end = endtime;
+
+		if (is_guard_record)
+			goto next_record;
 
 		if (dump_info->record_count >= record_capacity) {
 			record_capacity *= 2;
@@ -895,6 +943,7 @@ int cli_stackmap_fetch_dump_info(const char *dir_name, struct stackmap_dump_info
 
 		dump_info->record_count++;
 
+next_record:
 		file_offset += sizeof(uint64_t) + sizeof(uint64_t) + sizeof(uint64_t) + record_count * (sizeof(uint32_t) + sizeof(uint64_t)) + sizeof(uint8_t) * 2;
 		/* file_offset is the next header; footer starts two bytes earlier. */
 		fseek(file, file_offset - 2, SEEK_SET);
@@ -903,11 +952,6 @@ int cli_stackmap_fetch_dump_info(const char *dir_name, struct stackmap_dump_info
 			CLI_ERROR("Failed to read file footer or invalid footer");
 			goto failed;
 		}
-	}
-
-	if (dump_info->record_count == 0) {
-		CLI_ERROR("No valid records found in stack.bin");
-		goto failed;
 	}
 
 	if (decompress_path)

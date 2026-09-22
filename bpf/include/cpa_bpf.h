@@ -67,7 +67,15 @@ struct stack_capture_ctx {
 	bool only_kernel;
 	int pid;
 	char comm[TASK_COMM_LEN];
+	/* BPF per-sample user-stack copy budget in ns; 0 disables. */
+	unsigned long long bpf_exec_time_guard_ns;
+	bool enable_coredump_capture;
 };
+
+/* Attach the do_coredump kprobe and tag crash-time samples. */
+void stack_capture_set_coredump_capture(bool enabled);
+/* mode: 0=auto 1=perfbuf 2=ringbuf; ring_mb resizes the ring buffer. */
+void stack_capture_set_datapath(int mode, unsigned int ring_mb);
 
 /* Clamp the copied user-stack payload for on-CPU capture. */
 int set_stack_capture_size(int size);

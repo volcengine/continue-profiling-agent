@@ -24,6 +24,11 @@ void bpf_event_poll_destroy(void);
 int bpf_event_poll_register(int perf_map_fd, int page_cnt, bpf_event_process_fn fn);
 
 /**
+ * Register callback for a BPF_MAP_TYPE_RINGBUF map fd.
+ */
+int bpf_event_poll_register_ringbuf(int ring_map_fd, bpf_event_process_fn fn);
+
+/**
  * struct bpf_event_poll_stats - shared perf-buffer transport counters
  * @lost_events: lost records reported by libbpf perf-buffer callbacks
  */
