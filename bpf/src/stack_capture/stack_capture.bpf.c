@@ -393,7 +393,7 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 			event->type |= STACK_EVENT_KTHREAD;
 		} else {
 			struct task_struct *group = BPF_CORE_READ(cur, group_leader);
-			event->unique_id = BPF_CORE_READ(group, start_time);
+			event->unique_id = task_start_time_ticks(group);
 			BPF_CORE_READ_STR_INTO(&event->group_comm, group, comm);
 			event->type |= STACK_EVENT_COMMON;
 		}
@@ -459,7 +459,7 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 	}
 
 	struct task_struct *group = BPF_CORE_READ(cur, group_leader);
-	event->unique_id = BPF_CORE_READ(group, start_time);
+	event->unique_id = task_start_time_ticks(group);
 	BPF_CORE_READ_STR_INTO(&event->group_comm, group, comm);
 
 	event->type |= STACK_EVENT_COMMON;

@@ -53,6 +53,38 @@ static __always_inline __s64 get_task_state(struct task_struct *task)
 	return BPF_CORE_READ(task, state);
 }
 
+/*
+ * The process instance identity (stack_event::unique_id and the process-exit
+ * event) is the leader's start time in USER_HZ clock ticks, exactly field 22
+ * of /proc/<pid>/stat, which user space and libgunwinder read for the same
+ * process.  That field is the boot-time start (real_start_time, renamed
+ * start_boottime in 5.5), not task_struct::start_time, which is monotonic
+ * and drifts from it by every suspend.  Every producer must use this helper.
+ * USER_HZ is 100, so the divisor is NSEC_PER_SEC / USER_HZ.
+ */
+#define CPA_USER_HZ_NS 10000000ULL
+
+struct task_struct___boottime {
+	u64 start_boottime;
+};
+
+struct task_struct___real_start {
+	u64 real_start_time;
+};
+
+static __always_inline __u64 task_start_time_ticks(struct task_struct *group_leader)
+{
+	struct task_struct___boottime *cur = (void *)group_leader;
+	struct task_struct___real_start *old = (void *)group_leader;
+	__u64 ns;
+
+	if (bpf_core_field_exists(cur->start_boottime))
+		ns = BPF_CORE_READ(cur, start_boottime);
+	else
+		ns = BPF_CORE_READ(old, real_start_time);
+	return ns / CPA_USER_HZ_NS;
+}
+
 struct kernfs_node___old {
 	union {
 		struct {

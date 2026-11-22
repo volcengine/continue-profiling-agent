@@ -31,6 +31,8 @@ int sched_process_exit_tp(struct trace_event_raw_sched_process_template *ctx)
 
 	event.pid = tgid;
 	event.ts = bpf_ktime_get_ns();
+	event.unique_id = task_start_time_ticks(
+		BPF_CORE_READ((struct task_struct *)bpf_get_current_task(), group_leader));
 
 	bpf_perf_event_output(ctx, &perf_output_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
 	return 0;

@@ -103,6 +103,8 @@ _Static_assert(sizeof(struct stack_event) + MAX_STACK_EVENT_USER_STACK_SIZE <= S
 struct process_exit_event {
 	unsigned int pid;
 	unsigned long ts;
+	/* the process instance: its start time in clock ticks */
+	unsigned long long unique_id;
 };
 
 #endif

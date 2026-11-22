@@ -198,7 +198,7 @@ static __always_inline int oncpu(void *ctx, struct task_struct *prev, struct tas
 	}
 
 	struct task_struct *group = BPF_CORE_READ(cur, group_leader);
-	event->unique_id = BPF_CORE_READ(group, start_time);
+	event->unique_id = task_start_time_ticks(group);
 	BPF_CORE_READ_STR_INTO(&event->group_comm, group, comm);
 
 	event->type |= STACK_EVENT_COMMON;
