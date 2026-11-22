@@ -73,7 +73,7 @@ int cpa_add_stack_event(struct stack_sample *sample);
  */
 struct exit_event {
 	uint64_t exit_ts;
-	uint32_t pid;
+	struct gu_process_exit_event gu;
 };
 
 /**

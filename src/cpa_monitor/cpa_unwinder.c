@@ -692,7 +692,7 @@ static void cpa_handle_pid_exit_events(unsigned long sample_ts)
 		    sample_ts - exit_event->exit_ts < CPA_PID_EXIT_GRACE_NS)
 			break;
 		exit_event = queue_pop(&pid_exit_queue);
-		gu_event_occur(gu_ctx, GU_EVENT_PROCESS_EXIT, &exit_event->pid);
+		gu_event_occur(gu_ctx, GU_EVENT_PROCESS_EXIT, &exit_event->gu);
 		free(exit_event);
 	}
 }

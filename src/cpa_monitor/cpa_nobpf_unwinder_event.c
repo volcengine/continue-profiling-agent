@@ -273,7 +273,9 @@ static void nobpf_unwinder_timer(void *worker_ctx)
 			return;
 
 		e->exit_ts = get_current_uptime_ns();
-		e->pid = entry->key;
+		e->gu.pid = entry->key;
+		/* the instance is unknown here: 0 matches the cached one */
+		e->gu.start_time = 0;
 
 		cpa_add_pid_exit_event(e);
 

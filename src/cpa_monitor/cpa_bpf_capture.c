@@ -438,7 +438,8 @@ static void exit_event_process(void *event, unsigned int sz, void *user_ctx)
 		goto out;
 
 	e->exit_ts = ((struct process_exit_event *)event)->ts;
-	e->pid = ((struct process_exit_event *)event)->pid;
+	e->gu.pid = ((struct process_exit_event *)event)->pid;
+	e->gu.start_time = ((struct process_exit_event *)event)->unique_id;
 
 	int ret = cpa_add_pid_exit_event(e);
 	if (ret)
