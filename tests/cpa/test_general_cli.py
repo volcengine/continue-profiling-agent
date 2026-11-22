@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 ByteDance
 
+import re
+from pathlib import Path
+
 import pytest
 
 from .conftest import print_test_name, run_command
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.mark.usefixtures("print_test_name")
@@ -59,7 +64,8 @@ def test_show_help_has_clearer_option_descriptions():
     stdout, stderr, return_code = run_command(["show", "--help"])
     assert return_code == 0, f"CLI show --help failed with stderr: {stderr}\nStdout: {stdout}"
     assert "--output_num" in stdout
-    assert "positive integer" in stdout.lower()
+    # help text is wrapped to the terminal width
+    assert "positive integer" in " ".join(stdout.lower().split())
     assert "--use_cache" in stdout
     assert "reuse decompressed files" in stdout.lower()
     assert "--show_range" in stdout
@@ -114,7 +120,9 @@ def test_cli_version_command():
     stdout, stderr, return_code = run_command(["version"])
     assert return_code == 0, f"cpa version failed with stderr: {stderr}\nStdout: {stdout}"
     assert stderr == ""
-    assert stdout.strip() == "continue-profiling-agent 1.0.0"
+    version = re.search(r'set\(CPA_BPF_VERSION "([^"]+)"', (REPO_ROOT / "CMakeLists.txt").read_text())
+    assert version is not None
+    assert stdout.strip() == f"continue-profiling-agent {version.group(1)}"
 
 
 @pytest.mark.usefixtures("print_test_name")

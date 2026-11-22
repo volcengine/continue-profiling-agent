@@ -11,13 +11,16 @@ def test_release_workflow_builds_sopacker_package_on_tags() -> None:
     workflow = REPO_ROOT / ".github" / "workflows" / "release.yml"
     text = workflow.read_text(encoding="utf-8")
 
-    assert "runs-on: ubuntu-24.04" in text
+    # one native runner per architecture
+    assert "runs-on: ${{ matrix.runner }}" in text
+    assert "runner: ubuntu-24.04\n" in text
+    assert "runner: ubuntu-24.04-arm" in text
     assert "tags:" in text and "v*" in text
     assert "submodules: recursive" in text
     assert "LIBGUNWINDER_DEPLOY_KEY" not in text
     assert "Configure private libgunwinder deploy key" not in text
     assert "cmake --build build -j --target cpa_portable" in text
-    assert "dist/cpa_portable-linux-x86_64 version" in text
+    assert "dist/cpa_portable-linux-${{ matrix.arch }} version" in text
     assert "gh release create" in text
     assert "gh release upload" in text
 
