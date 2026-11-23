@@ -83,6 +83,11 @@ ARG_DEFINE("ring_size_mb", NO_SINGLE_NAME, "ring buffer size in MiB when datapat
 
 	/* show */
 	ARG_DEFINE("read", 'r', "input CPA profile directory.", true),
+	ARG_DEFINE("list_core", NO_SINGLE_NAME, "list the coredump samples (--enable_coredump_capture) of the selected records, one block each, instead of a flamegraph.", false),
+	ARG_DEFINE("list_exit", NO_SINGLE_NAME, "list the non-zero exit samples (--enable_exit_capture) with their exit code; cannot be combined with --list_core.", false),
+	ARG_DEFINE("core_verbose", NO_SINGLE_NAME, "with --list_core / --list_exit: resolve native frames to source lines with addr2line (CPA_ADDR2LINE overrides the tool).", false),
+	ARG_DEFINE("core_container_pid", NO_SINGLE_NAME, "with --list_core / --list_exit: resolve paths through /proc/<pid>/root of this container process.", true),
+	ARG_DEFINE("core_debug_dir", NO_SINGLE_NAME, "with --list_core / --list_exit: also search separate debug files (.build-id) under these directories (colon list; also CPA_CORE_DEBUG_DIR).", true),
 	ARG_DEFINE("use_cui", 'G', "open the embedded cpa_show terminal UI.", false),
 	ARG_DEFINE("show_range", 'p', "print available record time range and exit.", false),
 	ARG_DEFINE("starttime", 'B', "start offset time in HH:MM:SS from the first captured record.", true),

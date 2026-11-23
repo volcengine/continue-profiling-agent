@@ -6,6 +6,7 @@
 #include "cli_common.h"
 #include "cli_profile_metadata.h"
 #include "cli_stackmap.h"
+#include "cpa_show_list.h"
 
 #include <libiberty/demangle.h>
 #include <sys/stat.h>
@@ -35,7 +36,7 @@ static FILE *flamegraph_output_fp = NULL;
 
 struct sub_cmd sub_cmd_cpa_show = {
 	.name = "show",
-	.arg_list = CPA_SHOW_CMDLINE "target_pid=0 target_comm=null target_env=null target_cgroup_id=0 target_cpu=all",
+	.arg_list = CPA_SHOW_CMDLINE "target_pid=0 target_comm=null target_env=null target_cgroup_id=0 target_cpu=all list_core=0 list_exit=0 core_verbose=0 core_container_pid=0 core_debug_dir=null",
 	.help_str = "[CPA] inspect stored profile data as flamegraph output or in the embedded TUI.",
 	.func = SUB_CMD_FUNC(cpa_show),
 };
@@ -158,6 +159,9 @@ static int cpa_show_render(void *ctx)
 	int output_num = atoi(get_arg_by_name(ctx, "output_num"));
 	int use_cache = atoi(get_arg_by_name(ctx, "use_cache"));
 	int show_thread_name = atoi(get_arg_by_name(ctx, "show_thread_name"));
+	bool list_core = atoi(get_arg_by_name(ctx, "list_core")) != 0;
+	bool list_exit = atoi(get_arg_by_name(ctx, "list_exit")) != 0;
+	pid_t core_container_pid = atoi(get_arg_by_name(ctx, "core_container_pid"));
 	int general_show_flags = META_SHOW_FLAG_NONE;
 	int out_ret = 0;
 	int ret;
@@ -185,6 +189,16 @@ static int cpa_show_render(void *ctx)
 		general_show_flags |= META_SHOW_FLAG_NO_ENV;
 	if (atoi(get_arg_by_name(ctx, "show_raw")))
 		general_show_flags |= META_SHOW_FLAG_RAW;
+
+	if (list_core && list_exit) {
+		CLI_ERROR("--list_core and --list_exit cannot be combined");
+		return -1;
+	}
+	if ((atoi(get_arg_by_name(ctx, "core_verbose")) || core_container_pid ||
+	     !cli_arg_is_null_default(get_arg_by_name(ctx, "core_debug_dir"))) && !list_core && !list_exit) {
+		CLI_ERROR("--core_verbose, --core_container_pid and --core_debug_dir need --list_core or --list_exit");
+		return -1;
+	}
 
 	starttime_set = convert_time_to_seconds(start_time_str);
 	if (starttime_set == UINT64_MAX) {
@@ -326,6 +340,12 @@ static int cpa_show_render(void *ctx)
 			free(target_conf);
 			goto end;
 		}
+	}
+
+	if (list_core || list_exit) {
+		out_ret = cpa_show_list(ctx, list_exit, cpa_show_filter_func, read_file, map, record, output_num, starttime,
+					core_container_pid);
+		goto end;
 	}
 
 	id_count_all = cli_stackmap_dump(read_file, record, output_num);
