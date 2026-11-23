@@ -22,6 +22,8 @@ enum cpa_capability_id {
 	CPA_CAP_PROCESS_EXIT,
 	CPA_CAP_COREDUMP,
 	CPA_CAP_RINGBUF,
+	/* --pagefault: a kernel entry for new anonymous pages (cpa_pagefault_rmap()) */
+	CPA_CAP_PAGEFAULT,
 	CPA_CAP_COUNT,
 };
 
@@ -74,5 +76,25 @@ bool cpa_capability_supported(const struct cpa_capability_set *set, enum cpa_cap
 const char *cpa_capability_id_name(enum cpa_capability_id id);
 const char *cpa_capability_state_name(enum cpa_capability_state state);
 const char *cpa_capability_reason_name(enum cpa_capability_reason reason);
+
+/* Where --pagefault learns of a new anonymous page. */
+enum cpa_pagefault_entry {
+	CPA_PF_ENTRY_NONE,		/* refused: see .why */
+	/* page_add_new_anon_rmap(page, vma, address, compound), 5.4 - 5.18 */
+	CPA_PF_ENTRY_PAGE,
+	/* folio_add_new_anon_rmap(folio, vma, address[, flags]), 6.3+ */
+	CPA_PF_ENTRY_FOLIO,
+};
+
+struct cpa_pagefault_rmap {
+	enum cpa_pagefault_entry entry;
+	const char *symbol;	/* the kernel function of the entry */
+	const char *why;	/* CPA_PF_ENTRY_NONE: what is missing */
+	int error;		/* CPA_PF_ENTRY_NONE: errno of a failed probe, 0 when the kernel lacks it */
+	const char *unverified;	/* a warning: an entry on a kernel series --pagefault was not run on, or NULL */
+};
+
+/* Decided once; CPA_CAP_PAGEFAULT is whether it has an entry. */
+const struct cpa_pagefault_rmap *cpa_pagefault_rmap(void);
 
 #endif

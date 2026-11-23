@@ -22,6 +22,12 @@ void bpf_event_poll_destroy(void);
  * Register callback for a perf-map file descriptor.
  */
 int bpf_event_poll_register(int perf_map_fd, int page_cnt, bpf_event_process_fn fn);
+/**
+ * Like bpf_event_poll_register(), and @lost_fn (on the poll thread) is told
+ * the records the kernel dropped because the buffer was full.
+ */
+int bpf_event_poll_register_lost(int perf_map_fd, int page_cnt, bpf_event_process_fn fn,
+				 bpf_event_lost_fn lost_fn);
 
 /**
  * Register callback for a BPF_MAP_TYPE_RINGBUF map fd.

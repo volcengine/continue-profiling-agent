@@ -86,6 +86,81 @@ struct {
 	__type(value, u32);
 } exit_claim SEC(".maps");
 
+#ifdef CPA_PAGEFAULT
+/*
+ * Pagefault variant (cpa monitor --pagefault): profile of the resident
+ * anonymous memory of one process.  A small judge program on the new
+ * anonymous page rmap hook samples pages and tail-calls the regular capture
+ * program, which stamps the page into the stack_event (pagefault_sample.h).
+ * Release programs report address ranges leaving the address space.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct pf_config);
+} pf_cfg SEC(".maps");
+
+/* The judge's decision, read by the capture program it tail-calls. */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct pf_sample_meta);
+} pf_scratch SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u32);
+} pf_progs SEC(".maps");
+
+/* struct pf_release_event */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(u32));
+} pf_events SEC(".maps");
+
+/* Written by BPF only (pf_cfg is userspace's): report losses. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct pf_state);
+} pf_state SEC(".maps");
+
+/* The target's mm as last seen by the judge, to recognise its teardown. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u64);
+} pf_mm SEC(".maps");
+
+/*
+ * A release syscall between sys_enter (arguments) and sys_exit (result),
+ * by thread: only a call that succeeded released anything.
+ */
+struct pf_syscall {
+	u64 ts;			/* sys_enter */
+	u64 start;
+	u64 len;
+	u64 arg;		/* brk: old break; mremap: new length */
+	u64 new_addr;		/* mremap: MREMAP_FIXED target */
+	u32 nr;			/* enum pf_syscall_nr */
+	u32 flags;		/* mremap flags */
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, u32);
+	__type(value, struct pf_syscall);
+} pf_pending SEC(".maps");
+#endif /* CPA_PAGEFAULT */
+
 #ifdef CPA_USE_RINGBUF
 #ifndef BPF_MAP_TYPE_RINGBUF
 #define BPF_MAP_TYPE_RINGBUF 27
@@ -347,6 +422,73 @@ advance_filtered_irq_timestamp(u64 *time, bool is_irq_timer,
 		*drop_next = 0;
 }
 
+#ifdef CPA_PAGEFAULT
+/* The page the judge sampled: the capture program runs only as its tail call. */
+static __always_inline void pf_stamp_event(struct stack_event *event)
+{
+	u32 zero = 0;
+	struct pf_sample_meta *meta = bpf_map_lookup_elem(&pf_scratch, &zero);
+
+	if (meta)
+		event->pf = *meta;
+}
+
+/*
+ * A report that finds its buffer full is counted, never silently lost: a
+ * lost release would keep its pages in the live set for good.  @ts orders
+ * it against the sampled pages (their capture time).
+ */
+static __always_inline void pf_report(void *ctx, u64 ts, u32 kind, u64 start,
+				      u64 end, u64 new_start, u32 weight)
+{
+	struct pf_release_event ev = {};
+	struct pf_state *st;
+	u32 zero = 0;
+
+	ev.ts = ts;
+	ev.start = start;
+	ev.end = end;
+	ev.new_start = new_start;
+	ev.kind = kind;
+	ev.weight = weight;
+	if (!bpf_perf_event_output(ctx, &pf_events, BPF_F_CURRENT_CPU, &ev,
+				   sizeof(ev)))
+		return;
+	/* an ARRAY value is never recycled: the atomic add is safe */
+	st = bpf_map_lookup_elem(&pf_state, &zero);
+	if (!st)
+		return;
+	__sync_fetch_and_add(&st->failed_event_outputs, 1);
+	if (kind == PF_DROPPED)
+		__sync_fetch_and_add(&st->lost_pages, weight);
+	else
+		__sync_fetch_and_add(&st->lost_releases, 1);
+}
+
+static __always_inline void pf_emit_at(void *ctx, u64 ts, u32 kind, u64 start,
+				       u64 end, u64 new_start)
+{
+	pf_report(ctx, ts, kind, start, end, new_start, 0);
+}
+
+/* The stack buffer is full: the sampled page still counts, without a stack. */
+static __always_inline void pf_stack_dropped(void *ctx,
+					     const struct stack_event *event)
+{
+	struct pf_state *st;
+	u32 zero = 0;
+
+	if (!(event->pf.flags & PF_META_VALID))
+		return;
+	st = bpf_map_lookup_elem(&pf_state, &zero);
+	if (st)
+		__sync_fetch_and_add(&st->failed_stack_outputs, 1);
+	pf_report(ctx, event->timestamp, PF_DROPPED, event->pf.addr,
+		  event->pf.addr + ((u64)event->pf.pages << PF_PAGE_SHIFT),
+		  0, event->pf.weight);
+}
+#endif
+
 /*
  * @sidecar: 0 for a periodic or probe sample, STACK_EVENT_COREDUMP or
  * STACK_EVENT_EXIT_NONZERO for a sidecar one, which carries @sig and @code
@@ -501,6 +643,9 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 
 	event = (struct stack_event *)content;
 	content = content + sizeof(struct stack_event);
+#ifdef CPA_PAGEFAULT
+	pf_stamp_event(event);
+#endif
 
 	struct task_struct *cur = (struct task_struct *)bpf_get_current_task();
 
@@ -603,7 +748,12 @@ send_event:
 
 	if (event->stack_size > MAX_STACK_EVENT_USER_STACK_SIZE)
 		event->stack_size = MAX_STACK_EVENT_USER_STACK_SIZE;
+#ifdef CPA_PAGEFAULT
+	if (CPA_EMIT_EVENT(ctx, (u8 *)event, sizeof(struct stack_event) + event->stack_size))
+		pf_stack_dropped(ctx, event);
+#else
 	CPA_EMIT_EVENT(ctx, (u8 *)event, sizeof(struct stack_event) + event->stack_size);
+#endif
 
 	return 0;
 }
@@ -794,5 +944,410 @@ int BPF_KPROBE(stack_capture_exit_group, int code)
 		return 0;
 	return __stack_capture(ctx, false, STACK_EVENT_EXIT_NONZERO, code, 0);
 }
+
+#ifdef CPA_PAGEFAULT
+#define PF_VM_SHARED 0x00000008UL
+#define PF_MAP_FIXED 0x10
+#define PF_MREMAP_FIXED 2
+#define PF_MADV_DONTNEED 4
+#define PF_MADV_FREE 8
+#define PF_MADV_REMOVE 9
+#define PF_MADV_DONTNEED_LOCKED 24
+#define PF_ENOMEM 12
+#define PF_PAGE_ALIGN(x) (((x) + PF_PAGE_SIZE - 1) & ~(PF_PAGE_SIZE - 1))
+
+enum pf_syscall_nr {
+	PF_SYS_MUNMAP = 1,
+	PF_SYS_MADVISE,
+	PF_SYS_BRK,
+	PF_SYS_MMAP,
+	PF_SYS_MREMAP,
+};
+
+/* Syscall tracepoint records: 8 bytes of common fields, then the nr. */
+struct pf_sys_enter {
+	u64 common;
+	long nr;
+	unsigned long args[6];
+};
+
+struct pf_sys_exit {
+	u64 common;
+	long nr;
+	long ret;
+};
+
+/*
+ * The profiled process: --pid is a scalar; a rule selection (--first_match)
+ * is the one instance target_ctl latched into the shared target_pids, from
+ * its exec on.
+ */
+static __always_inline struct pf_config *pf_target_config(void)
+{
+	u32 zero = 0, tgid = bpf_get_current_pid_tgid() >> 32;
+	struct pf_config *cfg = bpf_map_lookup_elem(&pf_cfg, &zero);
+
+	if (!cfg)
+		return NULL;
+	if (cfg->tgid)
+		return tgid == cfg->tgid ? cfg : NULL;
+	if (!target_task_tracked((struct task_struct *)bpf_get_current_task(), tgid))
+		return NULL;
+	return cfg;
+}
+
+/*
+ * The judge, common to both entries: the target's own private anonymous
+ * memory.  Returns its configuration, or NULL for a page not to judge.
+ */
+static __always_inline struct pf_config *pf_target_anon(struct vm_area_struct *vma)
+{
+	struct task_struct *cur;
+	struct pf_config *cfg;
+	u64 mm, *seen, last = 0;
+	u32 zero = 0;
+
+	cfg = pf_target_config();
+	if (!cfg)
+		return NULL;
+	cur = (struct task_struct *)bpf_get_current_task();
+	mm = (u64)BPF_CORE_READ(cur, mm);
+	/* the target's own address space: not a fork copying into a child,
+	 * not khugepaged, not another process's userfaultfd or GUP */
+	if (!mm || (u64)BPF_CORE_READ(vma, vm_mm) != mm)
+		return NULL;
+	seen = bpf_map_lookup_elem(&pf_mm, &zero);
+	if (seen)
+		last = *seen;
+	if (last != mm)
+		bpf_map_update_elem(&pf_mm, &zero, &mm, BPF_ANY);
+	/* vma_is_anonymous(): no file mapping (a private file copy on write
+	 * too: its vma has a vm_file, rejected below), no shmem, hugetlb or
+	 * special mapping */
+	if (BPF_CORE_READ(vma, vm_ops))
+		return NULL;
+	/* before 4.18 a driver ->mmap may leave vm_ops NULL (bfd40eaff5ab) */
+	if (BPF_CORE_READ(vma, vm_file))
+		return NULL;
+	if (BPF_CORE_READ(vma, vm_flags) & PF_VM_SHARED)
+		return NULL;
+	return cfg;
+}
+
+/*
+ * @pages new pages at @addr, of the target's anonymous memory: sampled by
+ * pf_pages_sampled(), inclusion probability min(1, pages / N) with
+ * N <= PF_THP_PAGES, so a THP is always taken with its exact size and a
+ * 4 KiB page when its address hashes into the sample.
+ */
+static __always_inline int pf_sample_new(struct pt_regs *ctx,
+					 const struct pf_config *cfg, u64 addr,
+					 u32 pages)
+{
+	struct pf_sample_meta *meta;
+	u32 zero = 0;
+
+	addr &= ~(((u64)pages << PF_PAGE_SHIFT) - 1);
+	if (!pf_pages_sampled(addr, pages, cfg->salt, cfg->sample_mask))
+		return 0;
+	meta = bpf_map_lookup_elem(&pf_scratch, &zero);
+	if (!meta)
+		return 0;
+	meta->addr = addr;
+	meta->pages = pages;
+	meta->weight = pf_pages_weight(pages, cfg->sample_mask);
+	meta->flags = PF_META_VALID;
+	meta->pad = 0;
+	bpf_tail_call(ctx, &pf_progs, 0);
+	return 0;
+}
+
+/*
+ * Every new anonymous page is announced before it is mapped, by one of two
+ * entries; the loader attaches the one the kernel has.  First write fault,
+ * write to the zero page, copy on write, THP fault.  (Before 5.4 a full
+ * buffer drops a sampled page unseen: the loader refuses those kernels.)
+ *
+ * page_add_new_anon_rmap(page, vma, address, compound), 5.4 - 5.18: a
+ * compound page is a PMD-mapped THP.  5.19 dropped the argument; 5.19 -
+ * 6.2 are refused.
+ */
+SEC("kprobe/page_add_new_anon_rmap")
+int pf_new_anon_page(struct pt_regs *ctx)
+{
+	struct vm_area_struct *vma = (void *)PT_REGS_PARM2(ctx);
+	u64 addr = PT_REGS_PARM3(ctx);
+	bool compound = PT_REGS_PARM4(ctx) & 0xff;
+	struct pf_config *cfg = pf_target_anon(vma);
+
+	if (!cfg)
+		return 0;
+	return pf_sample_new(ctx, cfg, addr, compound ? PF_THP_PAGES : 1);
+}
+
+/*
+ * The fields of struct folio (6.1+, not in the compile headers) that give
+ * its size: a large folio has PG_head in flags and its order in
+ * _folio_order (6.1 - 6.5) or the low byte of _flags_1 (6.6+).
+ */
+struct folio___pf {
+	unsigned long flags;
+	unsigned long _flags_1;
+	unsigned char _folio_order;
+} __attribute__((preserve_access_index));
+
+/*
+ * folio_add_new_anon_rmap(folio, vma, address[, flags]), 6.3+: the page
+ * of 6.3 - 6.7 is a wrapper around it, so only this one is attached.  6.8+
+ * also maps multi-size THP: any power of two up to 2 MiB, @address aligned
+ * to it.  A larger order than a PMD's is a layout this program misreads:
+ * counted, never recorded.
+ */
+SEC("kprobe/folio_add_new_anon_rmap")
+int pf_new_anon_folio(struct pt_regs *ctx)
+{
+	struct folio___pf *folio = (void *)PT_REGS_PARM1(ctx);
+	struct vm_area_struct *vma = (void *)PT_REGS_PARM2(ctx);
+	u64 addr = PT_REGS_PARM3(ctx);
+	struct pf_config *cfg = pf_target_anon(vma);
+	struct pf_state *st;
+	u32 order = 0, zero = 0;
+	unsigned long head;
+
+	if (!cfg)
+		return 0;
+	head = 1UL << bpf_core_enum_value(enum pageflags, PG_head);
+	if (BPF_CORE_READ(folio, flags) & head) {
+		if (bpf_core_field_exists(folio->_folio_order))
+			order = BPF_CORE_READ(folio, _folio_order);
+		else
+			order = BPF_CORE_READ(folio, _flags_1) & 0xff;
+	}
+	if (order > PF_THP_ORDER) {
+		st = bpf_map_lookup_elem(&pf_state, &zero);
+		if (st)
+			__sync_fetch_and_add(&st->unknown_folios, 1);
+		return 0;
+	}
+	return pf_sample_new(ctx, cfg, addr, 1U << order);
+}
+
+/* pf_progs[0]: the regular capture, stamped with the judge's page. */
+SEC("kprobe")
+int stack_capture_pf(struct pt_regs *ctx)
+{
+	return __stack_capture(ctx, false, 0, 0, 0);
+}
+
+/*
+ * The address space ends: exec replaced it (setup_new_exec runs once the
+ * new mm is installed) or its last user dropped it (exit_mmap).
+ */
+SEC("kprobe/setup_new_exec")
+int pf_exec(struct pt_regs *ctx)
+{
+	if (pf_target_config())
+		pf_emit_at(ctx, bpf_ktime_get_ns(), PF_RESET, 0, 0, 0);
+	return 0;
+}
+
+/*
+ * By the mm the judge saw, whoever drops it last; or, before any fault
+ * was seen, the target's last thread in exit_mm() (current->mm is NULL).
+ */
+SEC("kprobe/exit_mmap")
+int pf_mm_gone(struct pt_regs *ctx)
+{
+	u64 mm = PT_REGS_PARM1(ctx), last = 0, none = 0, *seen;
+	struct task_struct *cur;
+	u32 zero = 0;
+
+	seen = bpf_map_lookup_elem(&pf_mm, &zero);
+	if (seen)
+		last = *seen;
+	if (last == mm) {
+		/* a freed mm may be reused by another process */
+		bpf_map_update_elem(&pf_mm, &zero, &none, BPF_ANY);
+	} else {
+		if (!pf_target_config())
+			return 0;
+		cur = (struct task_struct *)bpf_get_current_task();
+		if (BPF_CORE_READ(cur, mm))
+			return 0;
+	}
+	pf_emit_at(ctx, bpf_ktime_get_ns(), PF_RESET, 0, 0, 0);
+	return 0;
+}
+
+/* sys_enter: remember the call of the target. */
+static __always_inline void pf_enter(u32 nr, u64 start, u64 len, u64 arg,
+				     u64 new_addr, u32 flags, void *ctx)
+{
+	struct pf_syscall call = {
+		.ts = bpf_ktime_get_ns(), .start = start, .len = len,
+		.arg = arg, .new_addr = new_addr, .nr = nr, .flags = flags,
+	};
+	u32 tid = (u32)bpf_get_current_pid_tgid(), zero = 0;
+	struct pf_state *st;
+
+	if (!bpf_map_update_elem(&pf_pending, &tid, &call, BPF_ANY))
+		return;
+	st = bpf_map_lookup_elem(&pf_state, &zero);
+	if (st)		/* its release will not be reported */
+		__sync_fetch_and_add(&st->lost_releases, 1);
+}
+
+/*
+ * sys_exit: the call of the thread, if it is one of @nr.  With a fixed
+ * target, another process' call was never remembered: no hash lookup.
+ */
+static __always_inline bool pf_exit(u32 nr, struct pf_syscall *call)
+{
+	u64 pid_tgid = bpf_get_current_pid_tgid();
+	u32 tid = (u32)pid_tgid, zero = 0;
+	struct pf_config *cfg = bpf_map_lookup_elem(&pf_cfg, &zero);
+	struct pf_syscall *found;
+
+	if (cfg && cfg->tgid && cfg->tgid != (u32)(pid_tgid >> 32))
+		return false;
+	found = bpf_map_lookup_elem(&pf_pending, &tid);
+	if (!found)
+		return false;
+	*call = *found;
+	bpf_map_delete_elem(&pf_pending, &tid);
+	return call->nr == nr;
+}
+
+static __always_inline bool pf_failed(long ret)
+{
+	return ret < 0 && ret >= -4095;
+}
+
+/* The kernel works on whole pages: lengths are rounded up. */
+SEC("tracepoint/syscalls/sys_enter_munmap")
+int pf_munmap_enter(struct pf_sys_enter *ctx)
+{
+	if (pf_target_config())
+		pf_enter(PF_SYS_MUNMAP, ctx->args[0], ctx->args[1], 0, 0, 0, ctx);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_munmap")
+int pf_munmap_exit(struct pf_sys_exit *ctx)
+{
+	struct pf_syscall c;
+
+	if (pf_exit(PF_SYS_MUNMAP, &c) && ctx->ret == 0)
+		pf_emit_at(ctx, c.ts, PF_RELEASE, c.start,
+			   c.start + PF_PAGE_ALIGN(c.len), 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_madvise")
+int pf_madvise_enter(struct pf_sys_enter *ctx)
+{
+	unsigned long behavior = ctx->args[2];
+
+	if (behavior != PF_MADV_DONTNEED && behavior != PF_MADV_FREE &&
+	    behavior != PF_MADV_REMOVE && behavior != PF_MADV_DONTNEED_LOCKED)
+		return 0;
+	if (pf_target_config())
+		pf_enter(PF_SYS_MADVISE, ctx->args[0], ctx->args[1], 0, 0, 0, ctx);
+	return 0;
+}
+
+/* -ENOMEM: part of the range was unmapped, the mapped parts were done. */
+SEC("tracepoint/syscalls/sys_exit_madvise")
+int pf_madvise_exit(struct pf_sys_exit *ctx)
+{
+	struct pf_syscall c;
+
+	if (pf_exit(PF_SYS_MADVISE, &c) &&
+	    (ctx->ret == 0 || ctx->ret == -PF_ENOMEM))
+		pf_emit_at(ctx, c.ts, PF_RELEASE, c.start,
+			   c.start + PF_PAGE_ALIGN(c.len), 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_brk")
+int pf_brk_enter(struct pf_sys_enter *ctx)
+{
+	struct task_struct *cur;
+
+	if (!ctx->args[0] || !pf_target_config())
+		return 0;
+	cur = (struct task_struct *)bpf_get_current_task();
+	pf_enter(PF_SYS_BRK, 0, 0, BPF_CORE_READ(cur, mm, brk), 0, 0, ctx);
+	return 0;
+}
+
+/* brk returns the break now in effect; the page holding it stays. */
+SEC("tracepoint/syscalls/sys_exit_brk")
+int pf_brk_exit(struct pf_sys_exit *ctx)
+{
+	struct pf_syscall c;
+	u64 now = (u64)ctx->ret;
+
+	if (pf_exit(PF_SYS_BRK, &c) && now < c.arg)
+		pf_emit_at(ctx, c.ts, PF_RELEASE, PF_PAGE_ALIGN(now),
+			   PF_PAGE_ALIGN(c.arg), 0);
+	return 0;
+}
+
+/* MAP_FIXED replaces whatever was mapped in the range. */
+SEC("tracepoint/syscalls/sys_enter_mmap")
+int pf_mmap_enter(struct pf_sys_enter *ctx)
+{
+	if ((ctx->args[3] & PF_MAP_FIXED) && pf_target_config())
+		pf_enter(PF_SYS_MMAP, ctx->args[0], ctx->args[1], 0, 0, 0, ctx);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_mmap")
+int pf_mmap_exit(struct pf_sys_exit *ctx)
+{
+	struct pf_syscall c;
+
+	if (pf_exit(PF_SYS_MMAP, &c) && (u64)ctx->ret == c.start)
+		pf_emit_at(ctx, c.ts, PF_RELEASE, c.start,
+			   c.start + PF_PAGE_ALIGN(c.len), 0);
+	return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_mremap")
+int pf_mremap_enter(struct pf_sys_enter *ctx)
+{
+	if (pf_target_config())
+		pf_enter(PF_SYS_MREMAP, ctx->args[0], ctx->args[1], ctx->args[2],
+			 ctx->args[4], (u32)ctx->args[3], ctx);
+	return 0;
+}
+
+/*
+ * In the kernel's order: MREMAP_FIXED unmaps the target range, a shrink
+ * unmaps the tail, then the pages move with their page tables (a move is
+ * stamped after the releases of the same call).
+ */
+SEC("tracepoint/syscalls/sys_exit_mremap")
+int pf_mremap_exit(struct pf_sys_exit *ctx)
+{
+	struct pf_syscall c;
+	u64 old_len, new_len, kept, to = (u64)ctx->ret;
+
+	if (!pf_exit(PF_SYS_MREMAP, &c) || pf_failed(ctx->ret))
+		return 0;
+	old_len = PF_PAGE_ALIGN(c.len);
+	new_len = PF_PAGE_ALIGN(c.arg);
+	kept = new_len < old_len ? new_len : old_len;
+	if (c.flags & PF_MREMAP_FIXED)
+		pf_emit_at(ctx, c.ts, PF_RELEASE, to, to + new_len, 0);
+	if (kept < old_len)
+		pf_emit_at(ctx, c.ts, PF_RELEASE, c.start + kept,
+			   c.start + old_len, 0);
+	if (to != c.start && kept)
+		pf_emit_at(ctx, c.ts + 1, PF_MOVE, c.start, c.start + kept, to);
+	return 0;
+}
+#endif /* CPA_PAGEFAULT */
 
 char LICENSE[] SEC("license") = "GPL";

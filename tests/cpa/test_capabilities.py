@@ -26,6 +26,7 @@ CAPABILITIES = [
     "process_exit",
     "coredump",
     "ringbuf",
+    "pagefault",
 ]
 
 HARNESS = r"""

@@ -27,6 +27,9 @@
  */
 typedef void (*bpf_event_process_fn)(void *event, unsigned int size, void *user_ctx);
 
+/* Records of @cpu's perf buffer the kernel dropped, the buffer being full. */
+typedef void (*bpf_event_lost_fn)(int cpu, unsigned long long lost_cnt);
+
 #define STACK_CAPTURE_SIZE 8192
 
 #ifdef __CPA_BPF_ARCH_x86
@@ -56,6 +59,8 @@ enum stack_event_type {
  * its number, | 0x80 for a core dump), @signal_code is unused.
  */
 #define STACK_EVENT_EXIT_NONZERO (1U << STACK_EVENT_EXIT_NONZERO_BIT)
+
+#include "pagefault_sample.h"
 
 #define MAX_FP_STACK_LEVEL (128 - 1)
 #define MAX_KERNEL_STACK_LEVEL MAX_FP_STACK_LEVEL
@@ -107,6 +112,8 @@ struct stack_event {
 	unsigned int ustack_fp_size;
 	unsigned char regs[PT_REGS_SIZE];
 	unsigned long sp;
+	/* cpa monitor --pagefault only: the sampled page (pagefault_sample.h) */
+	struct pf_sample_meta pf;
 };
 
 _Static_assert(sizeof(struct stack_event) + MAX_STACK_EVENT_USER_STACK_SIZE <= STACK_EVENT_MAX_PAYLOAD, "stack_event payload exceeds perf buffer limit");

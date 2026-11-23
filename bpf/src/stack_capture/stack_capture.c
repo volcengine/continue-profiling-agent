@@ -4,8 +4,10 @@
 #include <stack_capture.skel.h>
 #include <stack_capture_ringbuf.skel.h>
 #include <stack_capture_lite.skel.h>
+#include <stack_capture_pagefault.skel.h>
 #include <linux/perf_event.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -31,12 +33,29 @@
 static struct stack_capture_bpf *obj;
 static struct stack_capture_ringbuf_bpf *rb_obj;
 static struct stack_capture_lite_bpf *lite_obj;
+/*
+ * --pagefault: the only object loaded; a judge on the new anonymous page
+ * hook tail-calls its capture program instead of perf timers firing it.
+ */
+static struct stack_capture_pagefault_bpf *pf_obj;
 static struct bpf_object *sc_obj;
 static bool use_ringbuf;
 static bool use_lite;
+static bool pf_requested;
+static struct stack_capture_pagefault_cfg pf_request;
+static int pf_events = -1;
+#define PF_LINKS_MAX 16
+static struct bpf_link *pf_links[PF_LINKS_MAX];
 /* 0 = auto, 1 = force perfbuf, 2 = force ringbuf. */
 static int datapath_requested;
 static unsigned int ring_size_bytes = 16U * 1024U * 1024U;
+
+void stack_capture_set_pagefault(const struct stack_capture_pagefault_cfg *cfg)
+{
+	pf_requested = cfg && cfg->enabled;
+	if (pf_requested)
+		pf_request = *cfg;
+}
 
 void stack_capture_set_datapath(int mode, unsigned int ring_mb)
 {
@@ -275,6 +294,41 @@ static int load_lite(const struct bpf_object_open_opts *optsp)
 	return 0;
 }
 
+static int load_pagefault(const struct bpf_object_open_opts *optsp)
+{
+	bool folio = cpa_pagefault_rmap()->entry == CPA_PF_ENTRY_FOLIO;
+	int ret;
+
+	pf_obj = stack_capture_pagefault_bpf__open_opts(optsp);
+	if (!pf_obj)
+		return -1;
+	sc_preload_resize(pf_obj->obj, false);
+	/* Only the judge, its capture program and the release hooks run. */
+	bpf_program__set_autoload(pf_obj->progs.stack_capture_timer, false);
+	bpf_program__set_autoload(pf_obj->progs.stack_capture_tp, false);
+	bpf_program__set_autoload(pf_obj->progs.stack_capture_kprobe, false);
+	bpf_program__set_autoload(pf_obj->progs.stack_capture_coredump, false);
+	bpf_program__set_autoload(pf_obj->progs.stack_capture_exit_group, false);
+	/*
+	 * One entry for new pages, the one the kernel has: the folio entry
+	 * reads struct folio, which older kernels lack.  A kernel without one
+	 * loads the page entry and is refused at the attach.
+	 */
+	bpf_program__set_autoload(pf_obj->progs.pf_new_anon_page, !folio);
+	bpf_program__set_autoload(pf_obj->progs.pf_new_anon_folio, folio);
+	prepare_target(pf_obj->maps.target_pids, pf_obj->progs.stack_capture_t0);
+	/* a t0 CPU sample has no place in a profile of bytes */
+	bpf_program__set_autoload(pf_obj->progs.stack_capture_t0, false);
+	ret = stack_capture_pagefault_bpf__load(pf_obj);
+	if (ret) {
+		stack_capture_pagefault_bpf__destroy(pf_obj);
+		pf_obj = NULL;
+		return ret;
+	}
+	sc_obj = pf_obj->obj;
+	return 0;
+}
+
 /*
  * Three objects, best first: ringbuf (5.8+), perfbuf, and lite for kernels
  * without bpf_get_stack or bounded loops (before 5.3, e.g. 4.14): kernel
@@ -290,7 +344,15 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 			    ringbuf_map_supported());
 	int ret = -1;
 
-	if (try_ringbuf) {
+	if (pf_requested) {
+		ret = load_pagefault(optsp);
+		if (ret) {
+			BPF_ERR("pagefault bpf load failed ret=%d\n", ret);
+			return ret;
+		}
+	}
+
+	if (!sc_obj && try_ringbuf) {
 		ret = load_ringbuf(optsp);
 		if (ret && datapath_requested == 2) {
 			BPF_ERR("ringbuf bpf load failed ret=%d\n", ret);
@@ -331,14 +393,20 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 	stacks_fd = use_lite ? sc_map_fd("stacks") : -1;
 	if (use_ringbuf)
 		record_target_fds(rb_obj->maps.target_pids, rb_obj->progs.stack_capture_t0);
+	else if (pf_obj)
+		record_target_fds(pf_obj->maps.target_pids, pf_obj->progs.stack_capture_t0);
 	else if (use_lite)
 		record_target_fds(lite_obj->maps.target_pids, lite_obj->progs.stack_capture_t0);
 	else
 		record_target_fds(obj->maps.target_pids, obj->progs.stack_capture_t0);
+	if (pf_obj) {
+		t0_prog_fd = -1;
+		pf_events = sc_map_fd("pf_events");
+	}
 	perf_output_events = use_ringbuf ? sc_map_fd("events_rb")
 				       : sc_map_fd("perf_output_events");
 	BPF_INFO("stack_capture object=%s datapath=%s ring_size=%u\n",
-		 use_lite ? "lite" : "full",
+		 pf_obj ? "pagefault" : use_lite ? "lite" : "full",
 		 use_ringbuf ? "ringbuf" : "perfbuf",
 		 use_ringbuf ? ring_size_bytes : 0);
 	return 0;
@@ -354,6 +422,11 @@ static void exit_bpf_module(void)
 		return;
 
 	detach_sidecar_links();
+	for (i = 0; i < PF_LINKS_MAX; i++) {
+		if (pf_links[i])
+			bpf_link__destroy(pf_links[i]);
+		pf_links[i] = NULL;
+	}
 	(void)stack_capture_clear_comm_stack_limits();
 	free(comm_stack_limit_keys);
 	comm_stack_limit_keys = NULL;
@@ -379,6 +452,11 @@ static void exit_bpf_module(void)
 		bpf_event_poll_unregister_no_free(perf_output_events);
 		stack_capture_ringbuf_bpf__destroy(rb_obj);
 		rb_obj = NULL;
+	} else if (pf_obj) {
+		bpf_event_poll_unregister_no_free(pf_events);
+		bpf_event_poll_unregister(perf_output_events, stack_capture_pagefault_bpf__destroy(pf_obj));
+		pf_obj = NULL;
+		pf_events = -1;
 	} else if (use_lite) {
 		bpf_event_poll_unregister(perf_output_events, stack_capture_lite_bpf__destroy(lite_obj));
 		lite_obj = NULL;
@@ -635,6 +713,98 @@ int stack_capture_get_comm_stack_limit_stat(struct stack_capture_comm_limit_stat
 	return 0;
 }
 
+/* Pages of the release event buffer: small records, bursts of munmap. */
+#define PF_EVENTS_PAGE_CNT 16
+
+/*
+ * Attach the pagefault judge, the address-space hooks and the release
+ * syscalls.  Everything must attach: a profile missing a release path would
+ * silently overstate memory.
+ */
+static int attach_pagefault(const struct stack_capture_ctx *user_ctx)
+{
+	const struct cpa_pagefault_rmap *rmap = cpa_pagefault_rmap();
+	bool folio = rmap->entry == CPA_PF_ENTRY_FOLIO;
+	const char *syms[] = { rmap->symbol, "setup_new_exec", "exit_mmap" };
+	struct bpf_program *progs[] = {
+		folio ? pf_obj->progs.pf_new_anon_folio : pf_obj->progs.pf_new_anon_page,
+		pf_obj->progs.pf_exec,
+		pf_obj->progs.pf_mm_gone,
+		pf_obj->progs.pf_munmap_enter,
+		pf_obj->progs.pf_munmap_exit,
+		pf_obj->progs.pf_madvise_enter,
+		pf_obj->progs.pf_madvise_exit,
+		pf_obj->progs.pf_brk_enter,
+		pf_obj->progs.pf_brk_exit,
+		pf_obj->progs.pf_mmap_enter,
+		pf_obj->progs.pf_mmap_exit,
+		pf_obj->progs.pf_mremap_enter,
+		pf_obj->progs.pf_mremap_exit,
+	};
+	struct pf_config cfg = {
+		.salt = pf_request.salt,
+		.tgid = user_ctx->target_dynamic ? 0 : (uint32_t)user_ctx->pid,
+		.sample_mask = pf_request.sample_pages - 1,
+	};
+	unsigned long addrs[2] = { 0 };
+	uint32_t zero = 0;
+	int prog_fd;
+
+	_Static_assert(sizeof(progs) / sizeof(progs[0]) <= PF_LINKS_MAX, "pf_links too small");
+	if (rmap->entry == CPA_PF_ENTRY_NONE) {
+		if (rmap->error)
+			BPF_ERR("pagefault: %s (error %d)\n", rmap->why, rmap->error);
+		else
+			BPF_ERR("pagefault: %s\n", rmap->why);
+		return -ENOTSUP;
+	}
+	/* by name: with kptr_restrict=2 every address reads 0 */
+	if (find_ksyms_addr(syms + 1, addrs, 2) != 2) {
+		BPF_ERR("pagefault: setup_new_exec or exit_mmap is not available on this kernel\n");
+		return -ENOTSUP;
+	}
+	if ((!user_ctx->target_dynamic && user_ctx->pid <= 0) || !pf_request.sample_pages ||
+	    (pf_request.sample_pages & (pf_request.sample_pages - 1)))
+		return -EINVAL;
+
+	if (bpf_map_update_elem(bpf_map__fd(pf_obj->maps.pf_cfg), &zero, &cfg, BPF_ANY))
+		return -errno;
+	prog_fd = bpf_program__fd(pf_obj->progs.stack_capture_pf);
+	if (bpf_map_update_elem(bpf_map__fd(pf_obj->maps.pf_progs), &zero, &prog_fd, BPF_ANY))
+		return -errno;
+	/* the kernel's own count of dropped records, beside BPF's */
+	if (bpf_event_poll_register_lost(pf_events, PF_EVENTS_PAGE_CNT, pf_request.release_fn,
+					 pf_request.events_lost_fn) < 0)
+		return -EIO;
+
+	for (unsigned int i = 0; i < sizeof(progs) / sizeof(progs[0]); i++) {
+		pf_links[i] = bpf_program__attach(progs[i]);
+		if (!pf_links[i]) {
+			BPF_ERR("pagefault: attaching %s failed: %d\n", bpf_program__name(progs[i]), -errno);
+			return -ENOTSUP;
+		}
+	}
+	/* what the session runs on, always logged */
+	fprintf(stderr, "pagefault: new anonymous pages from %s\n", rmap->symbol);
+	if (rmap->unverified)
+		BPF_WARN("pagefault: %s\n", rmap->unverified);
+	if (cfg.tgid)
+		fprintf(stderr, "pagefault: pid=%u sample_pages=%u hooks attached\n", cfg.tgid, pf_request.sample_pages);
+	else
+		fprintf(stderr, "pagefault: target_ctl selection sample_pages=%u hooks attached\n",
+			pf_request.sample_pages);
+	return 0;
+}
+
+int stack_capture_pagefault_state(struct pf_state *out)
+{
+	uint32_t zero = 0;
+
+	if (!pf_obj || bpf_map_lookup_elem(bpf_map__fd(pf_obj->maps.pf_state), &zero, out))
+		return -ENOENT;
+	return 0;
+}
+
 /**
  * Setup stack capture map/program and attach either explicit probe or CPU timers.
  */
@@ -668,7 +838,8 @@ int setup_stack_capture_event(int freq, bpf_event_process_fn fn, struct stack_ca
 	 */
 	int poll_ret = use_ringbuf ?
 bpf_event_poll_register_ringbuf(perf_output_events, fn) :
-bpf_event_poll_register(perf_output_events, page_cnt, fn);
+bpf_event_poll_register_lost(perf_output_events, page_cnt, fn,
+			     pf_obj ? pf_request.stack_lost_fn : NULL);
 if (poll_ret < 0) {
 		BPF_ERR("failed to register\n");
 		err = -1;
@@ -752,6 +923,13 @@ config.only_kernel = user_ctx->only_kernel;
 		goto clear;
 	}
 
+	if (pf_obj) {
+		err = attach_pagefault(user_ctx);
+		if (err)
+			goto clear;
+		return 0;
+	}
+
 	if (user_ctx->probe_name) {
 		probe_links = attach_by_name(user_ctx->probe_name);
 		if (!probe_links) {
@@ -810,7 +988,14 @@ config.only_kernel = user_ctx->only_kernel;
 
 clear:
 	bpf_event_poll_unregister_no_free(perf_output_events);
+	if (pf_obj)
+		bpf_event_poll_unregister_no_free(pf_events);
 	detach_sidecar_links();
+	for (i = 0; i < PF_LINKS_MAX; i++) {
+		if (pf_links[i])
+			bpf_link__destroy(pf_links[i]);
+		pf_links[i] = NULL;
+	}
 
 	for (i = 0; i < libbpf_num_possible_cpus(); i++) {
 		if (links && links[i]) {

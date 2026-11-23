@@ -48,6 +48,8 @@ struct perf_buffer *pb;
 struct ring_buffer *rb;
 };
 bpf_event_process_fn handler;
+	/* set before the buffer exists: the poll thread only reads it */
+	bpf_event_lost_fn lost_handler;
 	_Atomic unsigned int active_consumers;
 	_Atomic bool detaching;
 	struct perf_event_epoll_ref *ref;
@@ -289,11 +291,21 @@ static void __handle_perf_event(void *ctx, int cpu, void *data, __u32 data_sz)
 
 static void __handle_lost_events(void *ctx, int cpu, __u64 lost_cnt)
 {
+	struct perf_event_handler_ctx *pb_ctx = ctx;
+
 	atomic_fetch_add_explicit(&g_lost_events, lost_cnt, memory_order_relaxed);
 	BPF_WARN("lost %llu events on CPU #%d\n", lost_cnt, cpu);
+	if (pb_ctx->lost_handler)
+		pb_ctx->lost_handler(cpu, lost_cnt);
 }
 
 int bpf_event_poll_register(int perf_map_fd, int page_cnt, bpf_event_process_fn fn)
+{
+	return bpf_event_poll_register_lost(perf_map_fd, page_cnt, fn, NULL);
+}
+
+int bpf_event_poll_register_lost(int perf_map_fd, int page_cnt, bpf_event_process_fn fn,
+				 bpf_event_lost_fn lost_fn)
 {
 	int epoll_fd = -1;
 	struct perf_event_handler_ctx *ctx = NULL;
@@ -320,6 +332,7 @@ int bpf_event_poll_register(int perf_map_fd, int page_cnt, bpf_event_process_fn 
 	}
 
 	ctx->handler = fn;
+	ctx->lost_handler = lost_fn;
 	ctx->perf_map_fd = perf_map_fd;
 	ctx->backend = BPF_EVENT_BACKEND_PERFBUF;
 	ctx->ref = ref;

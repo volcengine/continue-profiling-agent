@@ -88,6 +88,26 @@ void stack_capture_set_exit_capture(bool enabled);
  * selection applies.  -EINVAL on a bad list.
  */
 int stack_capture_set_exit_targets(const char *const *comms, int n_comms, const unsigned int *pids, int n_pids);
+/*
+ * --pagefault: load the pagefault variant instead of the timer sampler.
+ * Sampled new anonymous pages arrive as stack events through the regular
+ * callback (stack_event::pf); address-space changes as struct
+ * pf_release_event through @release_fn, on the poll thread.  The lost
+ * callbacks are told the records the kernel dropped from full buffers.
+ */
+struct stack_capture_pagefault_cfg {
+	bool enabled;
+	unsigned int sample_pages;	/* a power of two, 1 to PF_SAMPLE_PAGES_MAX */
+	unsigned long long salt;
+	bpf_event_process_fn release_fn;
+	bpf_event_lost_fn stack_lost_fn;
+	bpf_event_lost_fn events_lost_fn;
+};
+
+void stack_capture_set_pagefault(const struct stack_capture_pagefault_cfg *cfg);
+/* What the BPF side could not report; -ENOENT without a pagefault object. */
+int stack_capture_pagefault_state(struct pf_state *out);
+
 /* mode: 0=auto 1=perfbuf 2=ringbuf; ring_mb resizes the ring buffer. */
 void stack_capture_set_datapath(int mode, unsigned int ring_mb);
 
