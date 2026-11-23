@@ -19,13 +19,15 @@ and coordinates:
 
 ### bpf_capture_worker
 - Loads and runs BPF-based stack capture and process-exit handling.
-- Feeds `stack_queue` and `pid_exit_queue`.
+- Feeds the unwind queue (`cpa_unwind_queue.c`): samples and process exits, routed to the lane of their process.
 
 ### perf_capture_worker
 - Provides the perf-based sampling backend.
 
 ### unwinder_worker
-- Drains captured samples, invokes libgunwinder, and appends frames to the shared stackmap.
+- `--unwind_workers` threads (worker 0 is the runtime loop), one queue lane and one libgunwinder context each; a process is always unwound by the worker of its lane.
+- Builds each sample's frames in the worker's own buffer (`cpa_frames.c`) and commits them to the shared stackmap under its lock once.
+- Reaps process exits after their grace period, once no sample of the instance is in flight.
 
 ### pid_tracker_worker / ksyms_check_worker
 - Maintains PID metadata for no-BPF unwind events and monitors `/proc/kallsyms` changes.

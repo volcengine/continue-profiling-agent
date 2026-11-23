@@ -272,12 +272,17 @@ static void nobpf_unwinder_timer(void *worker_ctx)
 		if (!e)
 			return;
 
-		e->exit_ts = get_current_uptime_ns();
+		/* CLOCK_MONOTONIC, the clock of BPF exit times the queue reaps by */
+		struct timespec ts;
+
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		e->exit_ts = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 		e->gu.pid = entry->key;
 		/* the instance is unknown here: 0 matches the cached one */
 		e->gu.start_time = 0;
 
-		cpa_add_pid_exit_event(e);
+		if (cpa_add_pid_exit_event(e))
+			free(e);
 
 		cli_counter_heap_entry_destroy(entry, payload_free);
 		retired_count++;

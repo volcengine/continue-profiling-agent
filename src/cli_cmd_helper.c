@@ -98,6 +98,7 @@ ARG_DEFINE("ring_size_mb", NO_SINGLE_NAME, "ring buffer size in MiB when datapat
 	/* profile */
 	ARG_DEFINE("offcpu", 'u', "collect off-CPU samples. Requires the BPF backend.", false),
 	ARG_DEFINE("max_queue_size", 'm', "maximum in-memory stack event queue length before backpressure.", true),
+	ARG_DEFINE("unwind_workers", NO_SINGLE_NAME, "threads that unwind user stacks, 1 to the online CPUs (at most 64); each process is unwound by one of them. Default 1.", true),
 	ARG_DEFINE("probe", NO_SINGLE_NAME, "capture stacks only when this probe fires, using bpftrace-style syntax such as 'kprobe:try_to_free_pages' or 'tracepoint:vmscan:mm_shrink_slab_start'. Requires the BPF backend.", true),
 
 };

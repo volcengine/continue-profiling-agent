@@ -31,6 +31,19 @@ int cpa_add_stack_event(struct stack_sample *sample);
 unsigned int cpa_unwinder_pending_samples(void);
 
 /**
+ * cpa_unwind_workers_validate - check --unwind_workers before workers start
+ * @cli_ctx: parsed CLI context
+ *
+ * Return: 0, or -EINVAL with a message.
+ */
+int cpa_unwind_workers_validate(void *cli_ctx);
+
+/**
+ * cpa_check_restart_loop - pause point of an unwind worker
+ */
+void cpa_check_restart_loop(void);
+
+/**
  * struct exit_event - process-exit record consumed by the unwinder loop
  * @exit_ts: process exit timestamp
  * @pid: pid that exited

@@ -46,20 +46,24 @@ def test_set_fd_limit_is_best_effort_and_called_early() -> None:
 
 
 def test_pid_exit_cleanup_waits_for_grace() -> None:
-    source = (REPO_ROOT / "src/cpa_monitor/cpa_unwinder.c").read_text(encoding="utf-8")
-    assert "#define CPA_PID_EXIT_GRACE_NS (10ULL * 1000000000ULL)" in source
-    body = _body(source, "static void cpa_handle_pid_exit_events")
+    source = (REPO_ROOT / "src/cpa_monitor/cpa_unwind_queue.c").read_text(encoding="utf-8")
+    assert "#define CPA_PID_EXIT_GRACE_NS (10ULL * 1000ULL * 1000ULL * 1000ULL)" in source
+    body = _body(source, "unsigned int cpa_unwind_queue_pop_ready_exits")
     assert "queue_peek" in body
     assert "CPA_PID_EXIT_GRACE_NS" in body
     # FIFO head that is not ripe yet stops the drain
     assert "break;" in body
+    # an exit with samples of its instance in flight waits for them
+    assert "exit_park_locked" in body
 
 
-def test_unwinder_idle_polling_backs_off() -> None:
-    source = (REPO_ROOT / "src/cpa_monitor/cpa_unwinder.c").read_text(encoding="utf-8")
-    assert "CPA_UNWIND_IDLE_SLEEP_MIN_US 1000U" in source
-    assert "CPA_UNWIND_IDLE_SLEEP_MAX_US 50000U" in source
-    assert "cpa_unwinder_next_idle_sleep" in source
+def test_unwinder_sleeps_until_woken() -> None:
+    queue = (REPO_ROOT / "src/cpa_monitor/cpa_unwind_queue.c").read_text(encoding="utf-8")
+    unwinder = (REPO_ROOT / "src/cpa_monitor/cpa_unwinder.c").read_text(encoding="utf-8")
+    # an idle worker sleeps on its lane's semaphore, no polling
+    assert "sem_wait(&lane->wake)" in queue
+    assert "set_stop_notify(cpa_unwind_queue_kick)" in queue
+    assert "usleep" not in unwinder
 
 
 def test_btf_null_sentinels_treated_as_unset() -> None:

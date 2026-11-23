@@ -13,6 +13,8 @@
 #include "cpa_runtime.h"
 #include "cpa_debug.h"
 #include "cpa_unwind_state.h"
+#include "cpa_unwind_queue.h"
+#include "cpa_frames.h"
 #include "uthash.h"
 
 #include <gunwinder/unwinder.h>
@@ -24,6 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 /**
  * @file cpa_unwinder.c
@@ -33,27 +36,9 @@
  * including initialization, cleanup, and re-initialization on pause.
  */
 
-static struct gu_context *gu_ctx = NULL;
 static pthread_mutex_t unwind_stat_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t stack_queue_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static char default_env_name[] = "SYSTEM";
-
-struct single_queue pid_exit_queue;
-struct single_queue stack_queue;
-
-/* Idle worker polling: back off geometrically 1ms -> 50ms while the
- * sample queue stays empty, instead of waking 1000 times per second.
- */
-#define CPA_UNWIND_IDLE_SLEEP_MIN_US 1000U
-#define CPA_UNWIND_IDLE_SLEEP_MAX_US 50000U
-
-static unsigned int cpa_unwinder_next_idle_sleep(unsigned int current_us)
-{
-	if (current_us >= CPA_UNWIND_IDLE_SLEEP_MAX_US / 2)
-		return CPA_UNWIND_IDLE_SLEEP_MAX_US;
-	return current_us * 2;
-}
 
 #define MIN_QUEUE_SIZE 16
 #define CPA_RECORD_DAY_MS (24ULL * 60ULL * 60ULL * 1000ULL)
@@ -83,10 +68,8 @@ static struct gu_init_cfg gu_init_cfg = { 0 };
 static bool include_full_path = false;
 static bool disable_sym = false;
 static int queue_size = 0;
-static bool unwinder_configured = false;
 
 struct cpa_worker unwinder_worker;
-static atomic_bool accept_events;
 
 #define CPA_KERNEL_SYMBOL_CACHE_MAX 2048
 
@@ -102,7 +85,6 @@ static pthread_mutex_t record_time_base_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool record_time_base_valid = false;
 static uint64_t record_time_base_sample_ns;
 static uint64_t record_time_base_ms;
-static void cpa_unwind(struct stack_sample *sample);
 
 static pthread_mutex_t unwind_bench_lock = PTHREAD_MUTEX_INITIALIZER;
 static atomic_bool unwind_bench_enabled = ATOMIC_VAR_INIT(false);
@@ -351,19 +333,159 @@ static void cpa_resolve_kernel_symbol(unsigned long addr, char *buf, size_t len)
 	cpa_kernel_symbol_cache_insert(addr, buf);
 }
 
-static bool init_unwinder_context(void)
+/*
+ * Samples are unwound by --unwind_workers threads.  Worker 0 is the main
+ * thread's runtime loop (CPA_MAIN_WORKER); workers 1..N-1 are threads of
+ * their own, started at init and kept across pause/restore.  Each worker
+ * owns one queue lane and one libgunwinder context: a process (tgid) is
+ * always unwound by the worker of its lane, so its state in that context
+ * has one writer.  Kernel symbols are loaded by context 0 only
+ * (CPA_KERNEL_SYMBOLS_CTX) and looked up through it by every worker.
+ *
+ * A worker builds the frames of a sample in its own buffer without a lock,
+ * then takes the trace map lock once to commit them.
+ */
+#define FRAME_NAME_BUF_SIZE (4096 + 1024)
+
+struct unwind_worker {
+	unsigned int index;
+	struct gu_context *ctx;
+	struct cpa_frames frames;
+	char frame_buf[FRAME_NAME_BUF_SIZE];
+	char base_info[CPA_BASE_INFO_LEN];
+	/* when the next queued exit of the lane may be ready, 0 = none */
+	uint64_t exit_deadline_ns;
+	struct exit_event *exit_batch[CPA_PID_EXIT_DRAIN_BATCH];
+	pthread_t thread;
+	bool thread_started;
+};
+
+static struct unwind_worker workers[CPA_UNWIND_LANES_MAX];
+static unsigned int worker_count = 1;
+/*
+ * Publishing contexts: a pause replaces them, the timer thread reloads
+ * kernel symbols and reads statistics.  Never taken on a worker's unwind
+ * path: workers use their own context, which only an accepted pause (all
+ * workers parked) replaces.
+ */
+static pthread_mutex_t gu_ctx_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * The pause handshake.  A pause sets restart_requested and wakes every
+ * lane; each worker parks in cpa_check_restart_loop().  The pause owns the
+ * contexts and the queue once all worker_count workers are parked (or
+ * stopped, see workers_quiesced).
+ */
+static pthread_mutex_t restart_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t restart_cond = PTHREAD_COND_INITIALIZER;
+static bool restart_requested;
+static unsigned int workers_parked;
+/* aux workers leave their loop (stop, or a failed init) */
+static atomic_bool aux_quit;
+/*
+ * Aux workers start at the unwinder's init, before the workers initialized
+ * after it (debug dump, env...) have set their state: they wait here until
+ * worker 0's first round, which runs only once every worker is initialized.
+ */
+static bool workers_go;
+/*
+ * No worker holds a sample: set by an accepted pause until restore, and for
+ * good once stop has joined the aux workers (worker 0 is the main thread,
+ * out of its loop by then).  Only then may another thread unwind queued
+ * samples with the workers' contexts and buffers.
+ */
+static bool workers_quiesced;
+
+static struct gu_context *kernel_symbols_ctx(void)
 {
-	struct gu_context *new_ctx = gu_init(&gu_init_cfg);
-	if (!new_ctx) {
-		CLI_ERROR("Failed to initialize unwinder context");
-		return false;
+	return workers[CPA_KERNEL_SYMBOLS_CTX].ctx;
+}
+
+static struct unwind_worker *owner_of(uint32_t tgid)
+{
+	return &workers[cpa_unwind_lane_of(tgid)];
+}
+
+static void contexts_destroy(void)
+{
+	for (unsigned int i = 0; i < worker_count; i++) {
+		gu_cleanup(workers[i].ctx);
+		workers[i].ctx = NULL;
 	}
+}
 
-	unwinder_worker.worker_ctx = new_ctx;
-	gu_ctx = new_ctx;
-	unwinder_configured = true;
+static bool contexts_create(void)
+{
+	for (unsigned int i = 0; i < worker_count; i++) {
+		struct gu_init_cfg cfg = gu_init_cfg;
 
+		cfg.no_kernel_symbols = i != CPA_KERNEL_SYMBOLS_CTX;
+		workers[i].ctx = gu_init(&cfg);
+		if (!workers[i].ctx) {
+			CLI_ERROR("Failed to initialize unwinder context %u", i);
+			contexts_destroy();
+			return false;
+		}
+	}
 	return true;
+}
+
+static void *aux_worker_main(void *arg);
+
+static void aux_workers_join(void)
+{
+	atomic_store(&aux_quit, true);
+	pthread_mutex_lock(&restart_mutex);
+	pthread_cond_broadcast(&restart_cond);
+	pthread_mutex_unlock(&restart_mutex);
+	cpa_unwind_queue_kick();
+	for (unsigned int i = 1; i < worker_count; i++) {
+		if (!workers[i].thread_started)
+			continue;
+		pthread_join(workers[i].thread, NULL);
+		workers[i].thread_started = false;
+	}
+}
+
+static int aux_workers_start(void)
+{
+	atomic_store(&aux_quit, false);
+	workers_go = false;
+	for (unsigned int i = 1; i < worker_count; i++) {
+		int err = pthread_create(&workers[i].thread, NULL, aux_worker_main, &workers[i]);
+
+		if (err) {
+			CLI_ERROR("Failed to start unwind worker %u: %s", i, strerror(err));
+			aux_workers_join();
+			return -err;
+		}
+		workers[i].thread_started = true;
+	}
+	return 0;
+}
+
+static void preload_target_pid(int pid)
+{
+	if (pid <= 0)
+		return;
+	CLI_OUTPUT("preload debug info for pid %d.", pid);
+	pthread_mutex_lock(&gu_ctx_lock);
+	gu_preload_pid_debug_info(owner_of((uint32_t)pid)->ctx, pid);
+	pthread_mutex_unlock(&gu_ctx_lock);
+	CLI_OUTPUT("preload debug info done.");
+}
+
+int cpa_unwind_workers_validate(void *cli_ctx)
+{
+	const char *value = get_arg_by_name(cli_ctx, "unwind_workers");
+	unsigned int max = cpa_unwind_workers_max();
+	unsigned int n;
+
+	if (cpa_unwind_workers_parse(value, max, &n) == 0)
+		return 0;
+	CLI_ERROR("--unwind_workers must be an integer from 1 to %u (the online CPUs, at most %d), got '%s'", max,
+		  CPA_UNWIND_LANES_MAX, value);
+	return -EINVAL;
 }
 
 /**
@@ -371,117 +493,130 @@ static bool init_unwinder_context(void)
  */
 static enum cpa_worker_init_result cpa_unwinder_init(void *cli_ctx, void *worker_ctx)
 {
+	unsigned int count = 1;
+
+	(void)worker_ctx;
 	if (cpa_kernel_only_fastpath_requested(cli_ctx)) {
 		cpa_unwind_bench_reset(false);
 		return CPA_INIT_SKIP;
 	}
 
-	atomic_init(&accept_events, false);
 	cpa_unwind_record_time_reset();
 	cpa_unwind_bench_reset(atoi(get_arg_by_name(cli_ctx, "bench")) != 0);
-	unwinder_configured = false;
 	unwinder_worker.worker_ctx = NULL;
-	gu_ctx = NULL;
 	gu_init_cfg.go_not_strip_name = atoi(get_arg_by_name(cli_ctx, "strip_name_disable"));
 	include_full_path = atoi(get_arg_by_name(cli_ctx, "include_full_path"));
 	disable_sym = atoi(get_arg_by_name(cli_ctx, "disable_sym"));
-	int pid = atoi(get_arg_by_name(cli_ctx, "pid"));
+	if (cpa_unwind_workers_parse(get_arg_by_name(cli_ctx, "unwind_workers"), cpa_unwind_workers_max(), &count)) {
+		CLI_ERROR("invalid --unwind_workers");
+		return CPA_INIT_FAILED;
+	}
 
 	queue_size = atoi(get_arg_by_name(cli_ctx, "max_queue_size"));
 	queue_size = queue_size < MIN_QUEUE_SIZE ? MIN_QUEUE_SIZE : queue_size;
 
-	queue_init(&stack_queue, queue_size);
-	queue_init(&pid_exit_queue, 32768);
+	worker_count = count;
+	workers_parked = 0;
+	restart_requested = false;
+	workers_quiesced = false;
+	for (unsigned int i = 0; i < worker_count; i++) {
+		memset(&workers[i], 0, sizeof(workers[i]));
+		workers[i].index = i;
+		cpa_frames_init(&workers[i].frames);
+	}
 
-	/* keep at most one free buffer per queue slot */
-	unsigned int sample_pool_limit = cpa_sample_pool_default_limit();
-	if (sample_pool_limit > (unsigned int)queue_size)
-		sample_pool_limit = (unsigned int)queue_size;
-	cpa_sample_pool_init(sample_pool_limit);
-
-	init_drop_policy(queue_size);
-
-	if (!init_unwinder_context()) {
-		unwinder_configured = false;
+	if (cpa_unwind_queue_init(queue_size, worker_count))
+		return CPA_INIT_FAILED;
+	if (!contexts_create()) {
+		cpa_unwind_queue_cleanup(true);
 		return CPA_INIT_FAILED;
 	}
+	unwinder_worker.worker_ctx = workers[CPA_MAIN_WORKER].ctx;
 
-	if (pid) {
-		CLI_OUTPUT("preload debug info for pid %d.", pid);
-		gu_preload_pid_debug_info(gu_ctx, pid);
-		CLI_OUTPUT("preload debug info done.", pid);
+	preload_target_pid(atoi(get_arg_by_name(cli_ctx, "pid")));
+
+	if (aux_workers_start()) {
+		contexts_destroy();
+		cpa_unwind_queue_cleanup(true);
+		unwinder_worker.worker_ctx = NULL;
+		return CPA_INIT_FAILED;
 	}
+	if (worker_count > 1)
+		CLI_OUTPUT("unwind workers: %u", worker_count);
 
-	atomic_store_explicit(&accept_events, true, memory_order_release);
-
+	cpa_unwind_queue_set_accepting(true);
 	return CPA_INIT_SUCCESS;
 }
 
 struct gu_statistics gu_stats = { 0 };
 
 /**
- * Return libgunwinder stats snapshot copied into static cache.
+ * Return libgunwinder stats summed over the worker contexts.
  */
 struct gu_statistics *cpa_get_gunwinder_stat(void)
 {
-	if (!unwinder_worker.worker_ctx)
-		return &gu_stats;
-	struct gu_statistics *stats = gu_get_statistics(unwinder_worker.worker_ctx);
-	memcpy(&gu_stats, stats, sizeof(struct gu_statistics));
+	struct gu_statistics sum = { 0 };
 
+	pthread_mutex_lock(&gu_ctx_lock);
+	for (unsigned int i = 0; i < worker_count; i++) {
+		struct gu_statistics one;
+		uint64_t *dst = (uint64_t *)&sum;
+		const uint64_t *src = (const uint64_t *)&one;
+
+		if (!workers[i].ctx || gu_copy_statistics(workers[i].ctx, &one))
+			continue;
+		/* every field is a uint64_t counter or gauge */
+		for (size_t f = 0; f < sizeof(sum) / sizeof(uint64_t); f++)
+			dst[f] += src[f];
+	}
+	pthread_mutex_unlock(&gu_ctx_lock);
+	gu_stats = sum;
 	return &gu_stats;
+}
+
+/*
+ * Stop: the aux workers finish the sample in hand and are joined, before
+ * any worker is destroyed: the store worker's last flush (destroyed first)
+ * must not race a worker still writing to the trace map.  Worker 0 is the
+ * main thread, already out of the runtime loop.
+ */
+static void cpa_unwinder_stop(void *worker_ctx)
+{
+	(void)worker_ctx;
+	cpa_unwind_queue_set_accepting(false);
+	aux_workers_join();
+	pthread_mutex_lock(&restart_mutex);
+	workers_quiesced = true;
+	pthread_mutex_unlock(&restart_mutex);
 }
 
 static void cpa_unwinder_destroy(void *worker_ctx)
 {
 	(void)worker_ctx;
-	struct stack_sample *sample = NULL;
-	unwinder_configured = false;
-	while (1) {
-		pthread_mutex_lock(&stack_queue_lock);
-		sample = queue_pop(&stack_queue);
-		pthread_mutex_unlock(&stack_queue_lock);
-
-		if (!sample)
-			break;
-
-		cpa_sample_free(sample);
-	}
-
-	struct exit_event *exit_event = NULL;
-	while ((exit_event = queue_pop(&pid_exit_queue)) != NULL) {
-		free(exit_event);
-	}
-
-	gu_cleanup(unwinder_worker.worker_ctx);
+	/* idempotent: also the path of a failed runtime start */
+	cpa_unwinder_stop(NULL);
+	cpa_unwind_queue_cleanup(true);
+	pthread_mutex_lock(&gu_ctx_lock);
+	contexts_destroy();
+	pthread_mutex_unlock(&gu_ctx_lock);
+	for (unsigned int i = 0; i < worker_count; i++)
+		cpa_frames_destroy(&workers[i].frames);
 	unwinder_worker.worker_ctx = NULL;
-	gu_ctx = NULL;
 	cpa_kernel_symbol_cache_clear();
-	/* a capture callback still running falls back to malloc()/free() */
-	cpa_sample_pool_destroy();
 }
 
-static pthread_mutex_t restart_mutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t restart_cond = PTHREAD_COND_INITIALIZER;
-static bool restart_requested = false;
-static bool main_thread_paused = false;
-
 /**
- * Pause-point synchronization for restart paths.
- *
- * Runtime restart sets restart_requested and waits until the main unwinder loop
- * reaches this safe point. Restore clears the request and wakes the loop.
+ * Pause point of a worker: park while a restart is requested.
  */
-void cpa_check_restart_loop()
+void cpa_check_restart_loop(void)
 {
 	pthread_mutex_lock(&restart_mutex);
 	if (restart_requested) {
-		main_thread_paused = true;
-		pthread_cond_signal(&restart_cond);
-		while (restart_requested) {
+		workers_parked++;
+		pthread_cond_broadcast(&restart_cond);
+		while (restart_requested)
 			pthread_cond_wait(&restart_cond, &restart_mutex);
-		}
-		main_thread_paused = false;
+		workers_parked--;
 	}
 	pthread_mutex_unlock(&restart_mutex);
 }
@@ -491,54 +626,78 @@ void cpa_unwinder_restore(void *worker_ctx)
 	(void)worker_ctx;
 	pthread_mutex_lock(&restart_mutex);
 	restart_requested = false;
+	if (!should_stop())
+		workers_quiesced = false;
 	pthread_cond_broadcast(&restart_cond);
 	pthread_mutex_unlock(&restart_mutex);
 
-	if (!unwinder_configured || unwinder_worker.worker_ctx == NULL) {
+	if (!workers[CPA_MAIN_WORKER].ctx) {
 		CLI_ERROR("Failed to restore unwinder worker, context unavailable");
 		return;
 	}
 
 	cpa_unwind_record_time_reset();
-	atomic_store_explicit(&accept_events, true, memory_order_release);
+	cpa_unwind_queue_set_accepting(true);
 }
 
+/*
+ * Runs on the timer thread, never on a worker.  Waits until every worker is
+ * parked; a stop during the wait gives up (the workers are leaving, the
+ * contexts are kept as they are and freed at destroy).
+ */
 void cpa_unwinder_pause(void *worker_ctx)
 {
-	(void)worker_ctx;
-	atomic_store_explicit(&accept_events, false, memory_order_release);
+	bool accepted;
 
-	/*
-	 * Stop accepting events first, then wait for the main worker to park at a
-	 * safe point before tearing down and rebuilding libgunwinder context.
-	 */
+	(void)worker_ctx;
+	cpa_unwind_queue_set_accepting(false);
+
 	pthread_mutex_lock(&restart_mutex);
 	restart_requested = true;
-	while (!main_thread_paused) {
-		pthread_cond_wait(&restart_cond, &restart_mutex);
-	}
 	pthread_mutex_unlock(&restart_mutex);
+	cpa_unwind_queue_kick();
+
+	pthread_mutex_lock(&restart_mutex);
+	while (workers_parked < worker_count && !should_stop()) {
+		struct timespec abs;
+
+		clock_gettime(CLOCK_REALTIME, &abs);
+		abs.tv_nsec += 100 * 1000 * 1000;
+		if (abs.tv_nsec >= 1000000000L) {
+			abs.tv_sec++;
+			abs.tv_nsec -= 1000000000L;
+		}
+		pthread_cond_timedwait(&restart_cond, &restart_mutex, &abs);
+	}
+	accepted = workers_parked == worker_count;
+	if (accepted)
+		workers_quiesced = true;
+	pthread_mutex_unlock(&restart_mutex);
+
+	if (!accepted) {
+		CLI_ERROR("unwinder pause abandoned: stopping");
+		return;
+	}
 
 	reset_drop_policy();
 	cpa_unwind_record_time_reset();
 
-	cpa_unwinder_destroy(unwinder_worker.worker_ctx);
-	unwinder_configured = false;
-	unwinder_worker.worker_ctx = NULL;
-	gu_ctx = NULL;
-
-	if (!init_unwinder_context())
+	/* what is queued belongs to the contexts about to go: dropped, as ever */
+	cpa_unwind_queue_cleanup(false);
+	pthread_mutex_lock(&gu_ctx_lock);
+	contexts_destroy();
+	if (!contexts_create())
 		CLI_ERROR("Failed to initialize unwinder context");
+	unwinder_worker.worker_ctx = workers[CPA_MAIN_WORKER].ctx;
+	pthread_mutex_unlock(&gu_ctx_lock);
 
 	cpa_kernel_symbol_cache_clear();
-
-	return;
 }
 
 /**
  * Resolve process environment key for symbolization and filtering.
  */
-static char *cpa_get_pid_env(struct gu_context *gu_ctx, struct stack_sample *sample)
+static char *cpa_get_pid_env(struct gu_context *ctx, struct stack_sample *sample)
 {
 	char *env_name = NULL, *env_cached = NULL;
 	char **record_env_name = NULL;
@@ -550,15 +709,15 @@ static char *cpa_get_pid_env(struct gu_context *gu_ctx, struct stack_sample *sam
 		env_name = default_env_name;
 	} else if (record_env_name) {
 		int env_size = 0;
-		env_cached = gu_get_pid_private_info(gu_ctx, sample->tgid, &env_size);
+		env_cached = gu_get_pid_private_info(ctx, sample->tgid, &env_size);
 		if (env_cached) {
 			env_name = env_cached;
 		} else {
 			env_name = get_env_var_by_pid(sample->tgid, record_env_name, record_env_name_count);
 			if (env_name)
-				gu_set_pid_private_info(gu_ctx, sample->tgid, env_name, strlen(env_name) + 1);
+				gu_set_pid_private_info(ctx, sample->tgid, env_name, strlen(env_name) + 1);
 			else
-				gu_set_pid_private_info(gu_ctx, sample->tgid, default_env_name, strlen(default_env_name) + 1);
+				gu_set_pid_private_info(ctx, sample->tgid, default_env_name, strlen(default_env_name) + 1);
 		}
 	}
 
@@ -601,27 +760,26 @@ static unsigned long cpa_stack_count_from_event(const struct stack_event *event,
 	return count;
 }
 
-#define FRAME_NAME_BUF_SIZE (4096 + 1024)
-static char frame_name_buf[FRAME_NAME_BUF_SIZE];
 /**
- * Append one symbolized user frame to the shared tracemap.
+ * Append one symbolized user frame to the worker's frames.
  */
 static void process_single_frame_p(const struct gu_frame_record *frame, void *cb_ctx)
 {
-	struct cli_stackmap *trace_stackmap = (struct cli_stackmap *)cb_ctx;
+	struct unwind_worker *w = cb_ctx;
+	char *buf = w->frame_buf;
 
 	if (disable_sym) {
 		if (!frame->elf_info)
-			snprintf(frame_name_buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, "anon exec segment");
+			snprintf(buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, "anon exec segment");
 		else
-			snprintf(frame_name_buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, frame->elf_info->elf_file_path);
-		cli_stackmap_append(trace_stackmap, frame_name_buf);
+			snprintf(buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, frame->elf_info->elf_file_path);
+		cpa_frames_append(&w->frames, buf);
 		return;
 	}
 
 	if (!frame->elf_info) {
-		snprintf(frame_name_buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, "anon exec segment");
-		cli_stackmap_append(trace_stackmap, frame_name_buf);
+		snprintf(buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, "anon exec segment");
+		cpa_frames_append(&w->frames, buf);
 		return;
 	}
 
@@ -637,21 +795,19 @@ static void process_single_frame_p(const struct gu_frame_record *frame, void *cb
 
 	if (!frame->symbol) {
 		if (include_full_path && frame->elf_info->elf_file_path != NULL)
-			snprintf(frame_name_buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, elf_file_split_pid);
+			snprintf(buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, elf_file_split_pid);
 		else
-			snprintf(frame_name_buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, frame->elf_info->base_name);
-		cli_stackmap_append(trace_stackmap, frame_name_buf);
+			snprintf(buf, FRAME_NAME_BUF_SIZE, "0x%lx [%s]", frame->pc, frame->elf_info->base_name);
+		cpa_frames_append(&w->frames, buf);
 	} else {
 		if (include_full_path && frame->elf_info->elf_file_path != NULL) {
-			snprintf(frame_name_buf, FRAME_NAME_BUF_SIZE, "%s [%s]", frame->symbol, elf_file_split_pid);
-			cli_stackmap_append(trace_stackmap, frame_name_buf);
+			snprintf(buf, FRAME_NAME_BUF_SIZE, "%s [%s]", frame->symbol, elf_file_split_pid);
+			cpa_frames_append(&w->frames, buf);
 		} else {
-			cli_stackmap_append(trace_stackmap, frame->symbol);
+			cpa_frames_append(&w->frames, frame->symbol);
 		}
 	}
 }
-
-static char irqoff_sample[64] = { 0 };
 
 static const char *cpa_signal_name(int sig)
 {
@@ -665,9 +821,6 @@ static const char *cpa_signal_name(int sig)
 	default: return "SIG?";
 	}
 }
-static char single_ksym[256] = { 0 };
-
-static unsigned long last_sample_ts = 0;
 
 struct unwinder_stat unwind_stat = { 0 };
 
@@ -678,57 +831,22 @@ void cpa_get_unwinder_stat(struct unwinder_stat *stat)
 	pthread_mutex_unlock(&unwind_stat_lock);
 }
 
-/*
- * Samples captured before the exit can still be queued behind the
- * unwinder loop. Free the per-pid unwinder state only after this grace
- * period, so in-flight samples for the dying pid resolve against the
- * context they were captured with instead of a freed/missing one.
- */
-#define CPA_PID_EXIT_GRACE_NS (10ULL * 1000000000ULL)
-
-static void cpa_handle_pid_exit_events(unsigned long sample_ts)
+/* The exits of @w's lane that are ready: their processes' state goes. */
+static void cpa_reap_exits(struct unwind_worker *w)
 {
-	struct exit_event *exit_event = NULL;
+	unsigned int n;
 
-	if (sample_ts == 0 || !gu_ctx)
-		return;
+	do {
+		n = cpa_unwind_queue_pop_ready_exits(w->index, w->exit_batch, CPA_PID_EXIT_DRAIN_BATCH,
+						     &w->exit_deadline_ns);
+		for (unsigned int i = 0; i < n; i++) {
+			struct exit_event *exit_event = w->exit_batch[i];
 
-	/*
-	 * The exit queue is FIFO: stop at the first head that is not ripe
-	 * yet so later exits cannot overtake an earlier one's grace window.
-	 */
-	while ((exit_event = queue_peek(&pid_exit_queue)) != NULL) {
-		if (exit_event->exit_ts > sample_ts ||
-		    sample_ts - exit_event->exit_ts < CPA_PID_EXIT_GRACE_NS)
-			break;
-		exit_event = queue_pop(&pid_exit_queue);
-		gu_event_occur(gu_ctx, GU_EVENT_PROCESS_EXIT, &exit_event->gu);
-		cpa_target_on_exit(exit_event->gu.pid);
-		free(exit_event);
-	}
-}
-
-static void cpa_finish_unwind_sample(struct stack_sample *sample)
-{
-	int pending_queue_size = 0;
-
-	if (!sample)
-		return;
-
-	last_sample_ts = 0;
-	cpa_unwind(sample);
-	last_sample_ts = sample->timestamp;
-
-	cpa_sample_free(sample);
-
-	pending_queue_size = queue_count(&stack_queue);
-
-	pthread_mutex_lock(&unwind_stat_lock);
-	unwind_stat.stack_queue_len = pending_queue_size;
-	pthread_mutex_unlock(&unwind_stat_lock);
-
-	update_drop_policy_queue_len(pending_queue_size);
-	cpa_handle_pid_exit_events(last_sample_ts);
+			gu_event_occur(w->ctx, GU_EVENT_PROCESS_EXIT, &exit_event->gu);
+			cpa_target_on_exit(exit_event->gu.pid);
+			free(exit_event);
+		}
+	} while (n == CPA_PID_EXIT_DRAIN_BATCH);
 }
 
 void cpa_emit_kernel_only_sample(const struct stack_event *event, unsigned int sample_freq)
@@ -736,6 +854,9 @@ void cpa_emit_kernel_only_sample(const struct stack_event *event, unsigned int s
 	struct cli_stackmap *trace_stackmap = NULL;
 	char *env_name = NULL;
 	char group_comm[TASK_COMM_LEN] = { 0 };
+	char base_info[CPA_BASE_INFO_LEN];
+	char irqoff_sample[64];
+	char single_ksym[256];
 
 	if (!event)
 		return;
@@ -746,11 +867,11 @@ void cpa_emit_kernel_only_sample(const struct stack_event *event, unsigned int s
 		memcpy(group_comm, event->group_comm, sizeof(group_comm));
 
 	env_name = cpa_get_event_env_name(event);
-	generate_metadata(cpa_base_info, CPA_BASE_INFO_LEN, (char *)event->comm, group_comm, event->cgid, event->cpu, event->pid, env_name);
+	generate_metadata(base_info, CPA_BASE_INFO_LEN, (char *)event->comm, group_comm, event->cgid, event->cpu, event->pid, env_name);
 
 	trace_stackmap = cpa_main_tracemap_get_and_lock();
 
-	cli_stackmap_append(trace_stackmap, cpa_base_info);
+	cli_stackmap_append(trace_stackmap, base_info);
 	cli_stackmap_entry_reverse_ids(trace_stackmap);
 
 	if (event->type & STACK_EVENT_IRQOFF) {
@@ -785,58 +906,55 @@ void cpa_emit_kernel_only_sample(const struct stack_event *event, unsigned int s
 	cpa_free_env_string(env_name);
 }
 
-/**
- * Build and emit one complete stacktrace for a sample to tracemap.
- */
-static void cpa_unwind(struct stack_sample *sample)
+/* Append and close the marker frames of a sample, as one reversed group. */
+static void cpa_frames_marker(struct cpa_frames *frames, const char *marker)
 {
+	cpa_frames_append(frames, marker);
+	cpa_frames_reverse(frames);
+}
+
+/**
+ * Build one complete stacktrace for a sample in @w's frames, then commit it
+ * to the trace map under its lock.
+ */
+static void cpa_unwind(struct unwind_worker *w, struct stack_sample *sample)
+{
+	struct cpa_frames *frames = &w->frames;
+	struct cli_stackmap *trace_stackmap;
 	bool backtrace_user = true;
+	int backtrace_ret = GU_UNWIND_REASON_OK;
+	char marker[64];
 
 	if (!sample)
 		return;
 
-	int backtrace_ret = GU_UNWIND_REASON_OK;
+	cpa_frames_clear(frames);
+	char *env_name = cpa_get_pid_env(w->ctx, sample);
+	generate_metadata(w->base_info, CPA_BASE_INFO_LEN, sample->comm, sample->group_comm, sample->cgid, sample->cpu, sample->pid, env_name);
 
-	char *env_name = cpa_get_pid_env(gu_ctx, sample);
-	generate_metadata(cpa_base_info, CPA_BASE_INFO_LEN, sample->comm, sample->group_comm, sample->cgid, sample->cpu, sample->pid, env_name);
-
-	struct cli_stackmap *trace_stackmap = cpa_main_tracemap_get_and_lock();
-
-	cli_stackmap_append(trace_stackmap, cpa_base_info);
-	cli_stackmap_entry_reverse_ids(trace_stackmap);
+	cpa_frames_marker(frames, w->base_info);
 
 	if (sample->type & STACK_EVENT_KTHREAD || sample->type & STACK_EVENT_DROP_BY_PRESSURE || should_drop_sample() == DROP_SAMPLE_RESULT_FULL_DROP || !cpa_env_should_parse(env_name)) {
 		backtrace_user = false;
-		if (should_drop_sample() == DROP_SAMPLE_RESULT_FULL_DROP) {
-			cli_stackmap_append(trace_stackmap, "<# PRESSURE FULL DROP SAMPLE #>");
-			cli_stackmap_entry_reverse_ids(trace_stackmap);
-		} else if (sample->type & STACK_EVENT_DROP_BY_PRESSURE) {
-			cli_stackmap_append(trace_stackmap, "<# PRESSURE HIGH DROP SAMPLE #>");
-			cli_stackmap_entry_reverse_ids(trace_stackmap);
-		}
+		if (should_drop_sample() == DROP_SAMPLE_RESULT_FULL_DROP)
+			cpa_frames_marker(frames, "<# PRESSURE FULL DROP SAMPLE #>");
+		else if (sample->type & STACK_EVENT_DROP_BY_PRESSURE)
+			cpa_frames_marker(frames, "<# PRESSURE HIGH DROP SAMPLE #>");
 	}
 
 	if (sample->type & STACK_EVENT_IRQOFF) {
-		snprintf(irqoff_sample, sizeof(irqoff_sample), "<# IRQOFF SAMPLE ON CPU %d #>", sample->cpu);
-		cli_stackmap_append(trace_stackmap, irqoff_sample);
-		cli_stackmap_entry_reverse_ids(trace_stackmap);
+		snprintf(marker, sizeof(marker), "<# IRQOFF SAMPLE ON CPU %d #>", sample->cpu);
+		cpa_frames_marker(frames, marker);
 	}
 
 	if (sample->type & STACK_EVENT_COREDUMP) {
-		char coredump_sample[64];
-
-		snprintf(coredump_sample, sizeof(coredump_sample),
-			 "<# COREDUMP %s code=%d #>",
-			 cpa_signal_name(sample->signal), sample->signal_code);
-		cli_stackmap_append(trace_stackmap, coredump_sample);
-		cli_stackmap_entry_reverse_ids(trace_stackmap);
+		snprintf(marker, sizeof(marker), "<# COREDUMP %s code=%d #>", cpa_signal_name(sample->signal), sample->signal_code);
+		cpa_frames_marker(frames, marker);
 	}
 
 	if (sample->type & STACK_EVENT_OFFCPU) {
-		char buf[32];
-		snprintf(buf, sizeof(buf), "<# OFFCPU SAMPLE: (%c) #>", sample->state);
-		cli_stackmap_append(trace_stackmap, buf);
-		cli_stackmap_entry_reverse_ids(trace_stackmap);
+		snprintf(marker, sizeof(marker), "<# OFFCPU SAMPLE: (%c) #>", sample->state);
+		cpa_frames_marker(frames, marker);
 	}
 
 	if (backtrace_user) {
@@ -856,20 +974,20 @@ static void cpa_unwind(struct stack_sample *sample)
 		unwind_stat.sample_backtrace_times++;
 		pthread_mutex_unlock(&unwind_stat_lock);
 
-		// stackmap current level without stack trace
-		int no_stack_index = cli_stackmap_current_length(trace_stackmap);
+		// frames so far, without the user stack
+		uint32_t no_stack_index = cpa_frames_length(frames);
 
 		cpa_debug_dump_sample(sample);
 
 		if (unwind_state_saved) {
 			bench_start_ns = cpa_unwind_bench_start();
-			gu_unwind(gu_ctx, sample->info, process_single_frame_p, trace_stackmap);
+			gu_unwind(w->ctx, sample->info, process_single_frame_p, w);
 
-			int backtrace_level = cli_stackmap_current_length(trace_stackmap) - no_stack_index;
+			int backtrace_level = (int)(cpa_frames_length(frames) - no_stack_index);
 			use_fp = sample->info->ustack_fp_level > backtrace_level;
 
 			if (cpa_unwind_state_restore(sample->info, &unwind_state)) {
-				cli_stackmap_current_reset(trace_stackmap, no_stack_index);
+				cpa_frames_reset(frames, no_stack_index);
 			} else {
 				run_final_unwind = false;
 				use_fp = false;
@@ -891,12 +1009,12 @@ static void cpa_unwind(struct stack_sample *sample)
 			}
 
 			if (use_fp) {
-				gu_unwind(gu_ctx, sample->info, process_single_frame_p, trace_stackmap);
+				gu_unwind(w->ctx, sample->info, process_single_frame_p, w);
 			} else {
 				if (!bench_start_ns)
 					bench_start_ns = cpa_unwind_bench_start();
 
-				gu_unwind(gu_ctx, sample->info, process_single_frame_p, trace_stackmap);
+				gu_unwind(w->ctx, sample->info, process_single_frame_p, w);
 				cpa_unwind_bench_record(bench_start_ns);
 			}
 		}
@@ -904,139 +1022,150 @@ static void cpa_unwind(struct stack_sample *sample)
 		// add final stop reason
 		backtrace_ret = gu_flags_reason(sample->info->flags);
 		if (backtrace_ret == GU_UNWIND_REASON_PROCESS_EXIT || backtrace_ret == GU_UNWIND_REASON_LANG_SKIP)
-			cli_stackmap_append(trace_stackmap, stop_reason_str[backtrace_ret]);
+			cpa_frames_append(frames, stop_reason_str[backtrace_ret]);
 
-		cli_stackmap_entry_reverse_ids(trace_stackmap);
+		cpa_frames_reverse(frames);
 	}
 
 	if (!sample->user_mode && sample->kstack_fp_level == 0)
-		cli_stackmap_append(trace_stackmap, "kernel_drop_stack_[k]");
+		cpa_frames_append(frames, "kernel_drop_stack_[k]");
 
 	for (int i = 0; i < sample->kstack_fp_level; i++) {
 		if (sample->kstack_fp[i] == ALREADY_RESTORE_FLAG) {
-			cli_stackmap_append(trace_stackmap, "<#ALREADY RESTORE#>");
+			cpa_frames_append(frames, "<#ALREADY RESTORE#>");
 			continue;
 		}
 
 		uint64_t off = 0;
 		char sym_buf[256];
 
-		if (gu_search_kernel_symbol(gu_ctx, sample->kstack_fp[i], sym_buf, sizeof(sym_buf), &off) == 0)
-			snprintf(single_ksym, sizeof(single_ksym), "%s_[k]+%llu", sym_buf, (unsigned long long)off);
+		if (gu_search_kernel_symbol(kernel_symbols_ctx(), sample->kstack_fp[i], sym_buf, sizeof(sym_buf), &off) == 0)
+			snprintf(w->frame_buf, FRAME_NAME_BUF_SIZE, "%s_[k]+%llu", sym_buf, (unsigned long long)off);
 		else
-			snprintf(single_ksym, sizeof(single_ksym), "0x%lx_[k]", sample->kstack_fp[i]);
-		cli_stackmap_append(trace_stackmap, single_ksym);
+			snprintf(w->frame_buf, FRAME_NAME_BUF_SIZE, "0x%lx_[k]", sample->kstack_fp[i]);
+		cpa_frames_append(frames, w->frame_buf);
 	}
 
-	cli_stackmap_entry_reverse_ids(trace_stackmap);
-	cli_stackmap_done_at(trace_stackmap, sample->stack_count, cpa_record_ms_from_timestamp(trace_stackmap, sample->timestamp));
+	cpa_frames_reverse(frames);
 
+	trace_stackmap = cpa_main_tracemap_get_and_lock();
+	cpa_frames_commit(frames, trace_stackmap);
+	cli_stackmap_done_at(trace_stackmap, sample->stack_count, cpa_record_ms_from_timestamp(trace_stackmap, sample->timestamp));
 	cpa_main_tracemap_unlock();
 
 	cpa_free_env_string(env_name);
-
-	return;
 }
 
-int cpa_add_pid_exit_event(struct exit_event *exit)
+/* Unwind a popped sample of @w's lane and give it back to the queue. */
+static void cpa_finish_unwind_sample(struct unwind_worker *w, struct stack_sample *sample)
 {
-	if (!exit)
-		return -1;
+	unsigned int queued;
 
-	if (!atomic_load_explicit(&accept_events, memory_order_acquire))
-		return -1;
+	cpa_unwind(w, sample);
+	/* the sample is freed here: nothing reads it afterwards */
+	cpa_unwind_queue_retire_sample(sample);
 
-	return queue_push(&pid_exit_queue, exit);
+	queued = cpa_unwind_queue_sample_len();
+	pthread_mutex_lock(&unwind_stat_lock);
+	unwind_stat.stack_queue_len = queued;
+	pthread_mutex_unlock(&unwind_stat_lock);
+
+	/* pressure counts the samples workers hold, not only the queued ones */
+	update_drop_policy_queue_len(cpa_unwind_queue_admitted());
 }
 
-/**
- * Trigger symbol table reload event for module update notifications.
- */
+/* One round of a worker: reap the ready exits, wait for and unwind a sample. */
+static void cpa_worker_step(struct unwind_worker *w)
+{
+	struct stack_sample *sample;
+
+	cpa_reap_exits(w);
+	sample = cpa_unwind_queue_wait_sample(w->index, w->exit_deadline_ns);
+	if (!sample)
+		return;
+	if (should_stop()) {
+		cpa_unwind_queue_retire_sample(sample);
+		return;
+	}
+	cpa_finish_unwind_sample(w, sample);
+}
+
+static void *aux_worker_main(void *arg)
+{
+	struct unwind_worker *w = arg;
+
+	pthread_mutex_lock(&restart_mutex);
+	while (!workers_go && !atomic_load(&aux_quit) && !should_stop())
+		pthread_cond_wait(&restart_cond, &restart_mutex);
+	pthread_mutex_unlock(&restart_mutex);
+
+	while (!should_stop() && !atomic_load(&aux_quit)) {
+		cpa_check_restart_loop();
+		if (should_stop() || atomic_load(&aux_quit))
+			break;
+		cpa_worker_step(w);
+	}
+	return NULL;
+}
+
 void cpa_add_ksyms_reload_event(void)
 {
 	cpa_kernel_symbol_cache_clear();
 
-	if (!atomic_load_explicit(&accept_events, memory_order_acquire) || !gu_ctx)
+	if (!cpa_unwind_queue_accepting())
 		return;
-
-	gu_event_occur(gu_ctx, GU_EVENT_MODULE_RELOAD, NULL);
-}
-
-int cpa_add_stack_event(struct stack_sample *sample)
-{
-	if (!sample)
-		return -1;
-	if (!atomic_load_explicit(&accept_events, memory_order_acquire))
-		return -1;
-	pthread_mutex_lock(&stack_queue_lock);
-	int ret = queue_push(&stack_queue, sample);
-	pthread_mutex_unlock(&stack_queue_lock);
-	return ret;
+	/* the kernel symbols every worker looks up are context 0's */
+	pthread_mutex_lock(&gu_ctx_lock);
+	if (kernel_symbols_ctx())
+		gu_event_occur(kernel_symbols_ctx(), GU_EVENT_MODULE_RELOAD, NULL);
+	pthread_mutex_unlock(&gu_ctx_lock);
 }
 
 unsigned int cpa_unwinder_pending_samples(void)
 {
-	unsigned int n;
-
-	pthread_mutex_lock(&stack_queue_lock);
-	n = queue_count(&stack_queue);
-	pthread_mutex_unlock(&stack_queue_lock);
-	return n;
+	return cpa_unwind_queue_pending_samples();
 }
 
+/*
+ * Unwind what is still queued into the current map: the store worker before
+ * a restart or its last flush.  Only while no worker holds a sample (an
+ * accepted pause, or after stop): it uses the owners' contexts and buffers.
+ * Otherwise the queued samples are left to the drop at cleanup.
+ */
 void cpa_unwinder_drain_pending(void)
 {
-	struct stack_sample *sample = NULL;
+	bool quiesced;
 
-	if (!unwinder_configured || unwinder_worker.worker_ctx == NULL)
+	pthread_mutex_lock(&restart_mutex);
+	quiesced = workers_quiesced;
+	pthread_mutex_unlock(&restart_mutex);
+	if (!quiesced || !workers[CPA_MAIN_WORKER].ctx)
 		return;
 
-	while (1) {
-		pthread_mutex_lock(&stack_queue_lock);
-		sample = queue_pop(&stack_queue);
-		pthread_mutex_unlock(&stack_queue_lock);
+	for (unsigned int i = 0; i < worker_count; i++) {
+		struct stack_sample *sample;
 
-		if (!sample)
-			break;
-
-		cpa_finish_unwind_sample(sample);
+		while ((sample = cpa_unwind_queue_pop_sample(i)) != NULL)
+			cpa_finish_unwind_sample(&workers[i], sample);
 	}
 }
 
 /**
- * Consume samples, unwind when ready, and drain stale process-exit events.
+ * Worker 0, called again and again by the runtime loop of the main thread.
  */
 void cpa_unwind_main_worker_fn(void *worker_ctx)
 {
 	(void)worker_ctx;
-	struct stack_sample *sample = NULL;
-	unsigned int idle_sleep_us = CPA_UNWIND_IDLE_SLEEP_MIN_US;
-	while (1) {
-		pthread_mutex_lock(&stack_queue_lock);
-		sample = queue_pop(&stack_queue);
-		pthread_mutex_unlock(&stack_queue_lock);
-
-		if (sample)
-			break;
-
-		/*
-		 * Only sleep when the queue is empty. This keeps restart/shutdown
-		 * responsive without spinning while there is no work to consume.
-		 */
-		cpa_check_restart_loop();
-		usleep(idle_sleep_us);
-		idle_sleep_us = cpa_unwinder_next_idle_sleep(idle_sleep_us);
-		if (should_stop())
-			break;
+	pthread_mutex_lock(&restart_mutex);
+	if (!workers_go) {
+		workers_go = true;
+		pthread_cond_broadcast(&restart_cond);
 	}
-
-	if (should_stop()) {
-		if (sample)
-			cpa_sample_free(sample);
+	pthread_mutex_unlock(&restart_mutex);
+	cpa_check_restart_loop();
+	if (should_stop())
 		return;
-	}
-
-	cpa_finish_unwind_sample(sample);
+	cpa_worker_step(&workers[CPA_MAIN_WORKER]);
 }
 
 /**
@@ -1049,6 +1178,7 @@ struct cpa_worker unwinder_worker = {
 	.worker_index = 0,
 
 	.init_fn = cpa_unwinder_init,
+	.stop_fn = cpa_unwinder_stop,
 	.destroy_fn = cpa_unwinder_destroy,
 	.pause_fn = cpa_unwinder_pause,
 	.restore_fn = cpa_unwinder_restore,

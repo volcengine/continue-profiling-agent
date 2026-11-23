@@ -433,6 +433,12 @@ int cpa_runtime_stop(void)
 	if (cpa_runtime_join_timer_thread() != 0)
 		return EXIT_FAILURE;
 
+	for (int i = 0; i < runtime.worker_count; i++) {
+		struct cpa_worker *worker = runtime.workers[i];
+
+		if (worker->stop_fn)
+			worker->stop_fn(worker->worker_ctx);
+	}
 	cpa_runtime_worker_exec_destroy();
 
 	old_map = cpa_runtime_replace_tracemap(NULL);

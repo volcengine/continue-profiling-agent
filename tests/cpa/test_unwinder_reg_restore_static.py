@@ -15,13 +15,13 @@ class CPAUnwinderRegRestoreTest(unittest.TestCase):
         )
 
         block_start = source.index("static void cpa_unwind")
-        block_end = source.index("int cpa_add_pid_exit_event", block_start)
+        block_end = source.index("static void cpa_finish_unwind_sample", block_start)
         return source[block_start:block_end]
 
     def test_probe_unwind_restores_registers_before_final_unwind(self) -> None:
         block = self._unwind_block()
 
-        unwind_call = "gu_unwind(gu_ctx, sample->info, process_single_frame_p"
+        unwind_call = "gu_unwind(w->ctx, sample->info, process_single_frame_p"
         first_unwind = block.index(unwind_call)
         restore = block.index("cpa_unwind_state_restore", first_unwind)
         final_unwind = block.index(unwind_call, restore)
@@ -33,7 +33,7 @@ class CPAUnwinderRegRestoreTest(unittest.TestCase):
         block = self._unwind_block()
 
         first_unwind = block.index(
-            "gu_unwind(gu_ctx, sample->info, process_single_frame_p"
+            "gu_unwind(w->ctx, sample->info, process_single_frame_p"
         )
         restore = block.index("cpa_unwind_state_restore", first_unwind)
         first_record = block.index("cpa_unwind_bench_record(bench_start_ns)")

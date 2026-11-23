@@ -27,6 +27,7 @@ typedef void (*cpa_worker_timer_fn)(void *worker_ctx);
 typedef void (*cpa_worker_main_worker_fn)(void *worker_ctx);
 typedef enum cpa_worker_init_result (*cpa_worker_init_fn)(void *cli_ctx, void *worker_ctx);
 typedef void (*cpa_worker_destroy_fn)(void *worker_ctx);
+typedef void (*cpa_worker_stop_fn)(void *worker_ctx);
 typedef void (*cpa_worker_pause_fn)(void *worker_ctx);
 typedef void (*cpa_worker_restore_fn)(void *worker_ctx);
 
@@ -50,6 +51,8 @@ struct cpa_worker {
 	unsigned int worker_index;
 
 	cpa_worker_init_fn init_fn;
+	/* stop: quiesce threads of its own, before any worker is destroyed */
+	cpa_worker_stop_fn stop_fn;
 	cpa_worker_destroy_fn destroy_fn;
 
 	cpa_worker_pause_fn pause_fn;

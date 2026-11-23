@@ -73,6 +73,8 @@ set(CPA_MONITOR_SOURCES
     "${CPA_SRC_DIR}/cpa_monitor/cpa_stack_sample_builder.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_perf_capture.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_unwinder.c"
+    "${CPA_SRC_DIR}/cpa_monitor/cpa_unwind_queue.c"
+    "${CPA_SRC_DIR}/cpa_monitor/cpa_frames.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_env.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_nobpf_unwinder_event.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_stackmap_continuous.c"
