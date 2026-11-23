@@ -29,9 +29,16 @@ static int cpa_stack_event_tgid(const struct stack_event *event,
 }
 
 static void cpa_stack_sample_copy_kernel_stack(struct stack_sample *sample,
-					       const struct stack_event *event)
+					       const struct stack_event *event,
+					       const struct cpa_stack_sample_build_config *config)
 {
 	size_t kstack_level = event->kstack_sz;
+
+	if (kstack_level == 0 && event->kstack_id >= 0 && config->lookup_kstack) {
+		sample->kstack_fp_level = config->lookup_kstack(
+			event->kstack_id, sample->kstack_fp, MAX_FP_STACK_LEVEL);
+		return;
+	}
 
 	if (kstack_level > MAX_FP_STACK_LEVEL)
 		kstack_level = MAX_FP_STACK_LEVEL;
@@ -51,7 +58,7 @@ static void cpa_stack_sample_copy_header(struct stack_sample *sample,
 	sample->signal_code = event->signal_code;
 	sample->timestamp = event->timestamp;
 	sample->user_mode = event->user_mode;
-	cpa_stack_sample_copy_kernel_stack(sample, event);
+	cpa_stack_sample_copy_kernel_stack(sample, event, config);
 	sample->stack_count = cpa_stack_sample_count(event, config);
 	sample->cpu = event->cpu;
 	/*

@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 ByteDance
 
 #include <offcpu_capture.skel.h>
+#include <offcpu_capture_lite.skel.h>
+#include <string.h>
 #include <linux/perf_event.h>
 #include <unistd.h>
 #include <asm/unistd.h>
@@ -21,7 +23,11 @@
  */
 
 static struct offcpu_capture_bpf *obj;
+static struct offcpu_capture_lite_bpf *lite_obj;
+static struct bpf_object *oc_obj;
+static struct bpf_program *finish_task_switch_prog;
 static int perf_output_events, percpu_config, stack_content_buf, pid_start;
+static int stacks_fd = -1;
 static struct offcpu_capture_config *percpu_config_buf = NULL;
 
 static char *cpu_array_buf = NULL;
@@ -31,38 +37,72 @@ static struct bpf_link *links = NULL;
 static int offcpu_capture_size = 8192;
 static char *probe_func = NULL;
 
-/**
- * Open skeleton, set per-cpu map size, and resolve map fds.
+static int oc_map_fd(const char *name)
+{
+	return bpf_map__fd(bpf_object__find_map_by_name(oc_obj, name));
+}
+
+/*
+ * Open, size and load the full object, or the lite one on kernels without
+ * bpf_get_stack or bounded loops (before 5.3, e.g. 4.14): kernel stacks by
+ * stack id, a 16 KiB user-stack window, no frame-pointer user stack.
  */
 static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 {
-	int ret;
+	bool has_get_stack = libbpf_probe_bpf_helper(BPF_PROG_TYPE_KPROBE,
+						     BPF_FUNC_get_stack, NULL) > 0;
+	int ret = -1;
 
-	obj = offcpu_capture_bpf__open_opts(optsp);
-	if (!obj) {
-		BPF_ERR("bpf open failed func=%s\n", __func__);
-		return -1;
+	if (has_get_stack) {
+		obj = offcpu_capture_bpf__open_opts(optsp);
+		if (obj) {
+			bpf_map__set_max_entries(obj->maps.stack_content_buf, libbpf_num_possible_cpus());
+			ret = offcpu_capture_bpf__load(obj);
+			if (ret) {
+				offcpu_capture_bpf__destroy(obj);
+				obj = NULL;
+				BPF_WARN("bpf load failed ret=%d, trying the lite object\n", ret);
+			} else {
+				oc_obj = obj->obj;
+				finish_task_switch_prog = obj->progs.finish_task_switch_k;
+			}
+		}
 	}
 
-	bpf_map__set_max_entries(bpf_object__find_map_by_name(obj->obj, "stack_content_buf"), libbpf_num_possible_cpus());
-
-	ret = offcpu_capture_bpf__load(obj);
-	if (ret) {
-		BPF_ERR("bpf load failed func=%s\n", __func__);
-		return ret;
+	if (!oc_obj) {
+		lite_obj = offcpu_capture_lite_bpf__open_opts(optsp);
+		if (!lite_obj) {
+			BPF_ERR("bpf open failed func=%s\n", __func__);
+			return -1;
+		}
+		bpf_map__set_max_entries(lite_obj->maps.stack_content_buf, libbpf_num_possible_cpus());
+		ret = offcpu_capture_lite_bpf__load(lite_obj);
+		if (ret) {
+			BPF_ERR("bpf load failed func=%s ret=%d\n", __func__, ret);
+			offcpu_capture_lite_bpf__destroy(lite_obj);
+			lite_obj = NULL;
+			return ret;
+		}
+		oc_obj = lite_obj->obj;
+		finish_task_switch_prog = lite_obj->progs.finish_task_switch_k;
+		stacks_fd = oc_map_fd("stacks");
+		/* a downgrade: say what is lost */
+		BPF_WARN("offcpu_capture: %s, using the lite object: kernel stacks by stack id, "
+			 "user stack copy limited to 16 KiB, no frame-pointer user stack\n",
+			 has_get_stack ? "the full object did not load" : "no bpf_get_stack");
 	}
 
-	stack_content_buf = bpf_map__fd(obj->maps.stack_content_buf);
-	perf_output_events = bpf_map__fd(obj->maps.perf_output_events);
-	percpu_config = bpf_map__fd(obj->maps.percpu_config);
-	pid_start = bpf_map__fd(obj->maps.pid_start);
-
+	stack_content_buf = oc_map_fd("stack_content_buf");
+	perf_output_events = oc_map_fd("perf_output_events");
+	percpu_config = oc_map_fd("percpu_config");
+	pid_start = oc_map_fd("pid_start");
+	BPF_INFO("offcpu_capture object=%s\n", lite_obj ? "lite" : "full");
 	return 0;
 }
 
 static void exit_bpf_module(void)
 {
-	if (!obj)
+	if (!oc_obj)
 		return;
 
 	if (links) {
@@ -79,9 +119,33 @@ static void exit_bpf_module(void)
 		probe_func = NULL;
 	}
 
-	bpf_event_poll_unregister(perf_output_events, offcpu_capture_bpf__destroy(obj));
+	if (lite_obj) {
+		bpf_event_poll_unregister(perf_output_events, offcpu_capture_lite_bpf__destroy(lite_obj));
+		lite_obj = NULL;
+	} else {
+		bpf_event_poll_unregister(perf_output_events, offcpu_capture_bpf__destroy(obj));
+		obj = NULL;
+	}
+	oc_obj = NULL;
+	finish_task_switch_prog = NULL;
+	stacks_fd = -1;
+}
 
-	obj = NULL;
+/* See stack_capture_lookup_kstack(). */
+int offcpu_capture_lookup_kstack(long kstack_id, unsigned long *kstack, int max_level)
+{
+	unsigned long ips[MAX_KERNEL_STACK_LEVEL] = { 0 };
+	__u32 key = (__u32)kstack_id;
+	int n = 0;
+
+	if (stacks_fd < 0 || kstack_id < 0 || !kstack || max_level <= 0)
+		return 0;
+	if (bpf_map_lookup_elem(stacks_fd, &key, ips))
+		return 0;
+	while (n < max_level && n < MAX_KERNEL_STACK_LEVEL && ips[n])
+		n++;
+	memcpy(kstack, ips, n * sizeof(ips[0]));
+	return n;
 }
 
 BPF_MODULE(offcpu_capture, "4.14");
@@ -214,7 +278,7 @@ int setup_offcpu_capture_event(int freq, bpf_event_process_fn fn, struct offcpu_
 		goto clear;
 	}
 
-	links = bpf_program__attach_kprobe(obj->progs.finish_task_switch_k, false, probe_func);
+	links = bpf_program__attach_kprobe(finish_task_switch_prog, false, probe_func);
 	if (!links) {
 		BPF_ERR("failed to attach kprobe function finish_task_switch\n");
 		err = -ENOENT;

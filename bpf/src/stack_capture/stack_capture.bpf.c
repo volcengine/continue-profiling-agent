@@ -109,6 +109,20 @@ __uint(value_size, sizeof(u32));
 	bpf_perf_event_output((raw_ctx), &perf_output_events, BPF_F_CURRENT_CPU, (ev), (sz))
 #endif
 
+#ifdef CPA_LITE
+/*
+ * Kernels without bpf_get_stack (before 4.18) have bpf_get_stackid: the
+ * kernel stack goes into this map and the event carries its id.  The map
+ * is preallocated: 16384 stacks of MAX_KERNEL_STACK_LEVEL entries, 16 MiB.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_STACK_TRACE);
+	__uint(max_entries, 16384);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(u64) * MAX_KERNEL_STACK_LEVEL);
+} stacks SEC(".maps");
+#endif
+
 // in 64k system, still use 4096
 #define PAGE_SIZE 4096
 #define MAX_STACK_CAPTURE_PAGES (MAX_STACK_EVENT_USER_STACK_SIZE / PAGE_SIZE)
@@ -157,6 +171,29 @@ static __always_inline u32 stack_capture_effective_size(struct stack_capture_con
 	return size;
 }
 
+#ifdef CPA_LITE
+/*
+ * One page of the user-stack copy; false once the copy stops (size, task
+ * limit, unreadable page or the execution-time guard).  Kernels before 5.3
+ * take no loop and at most 4096 instructions, so the lite object copies
+ * four pages (16 KiB) in four explicit steps.
+ */
+static __always_inline bool copy_user_stack_page(struct stack_capture_config *config,
+						 u32 size, u64 start_ns, u8 **stack,
+						 u64 *page, u32 *read_size)
+{
+	if (*read_size >= size || *page >= config->task_max)
+		return false;
+	if (bpf_probe_read_user(*stack, PAGE_SIZE, (u8 *)*page))
+		return false;
+	*page += PAGE_SIZE;
+	*read_size += PAGE_SIZE;
+	*stack += PAGE_SIZE;
+	return !(config->bpf_exec_time_guard_ns != 0 &&
+		 bpf_ktime_get_ns() - start_ns > config->bpf_exec_time_guard_ns);
+}
+#endif
+
 static __always_inline int read_user_stack(struct stack_capture_config *config, u8 *stack, u64 sp)
 {
 	int ret = 0;
@@ -173,6 +210,15 @@ static __always_inline int read_user_stack(struct stack_capture_config *config, 
 		 * limit. The execution-time guard aborts a copy that runs too long
 		 * (slow or driver-backed mappings) so one task cannot stall sampling.
 		 */
+#ifdef CPA_LITE
+	(void)ret;
+	(void)copy_size;
+	(void)i;
+	if (copy_user_stack_page(config, stack_capture_size, copy_start_ns, &stack, &stack_page_start, &read_size) &&
+	    copy_user_stack_page(config, stack_capture_size, copy_start_ns, &stack, &stack_page_start, &read_size) &&
+	    copy_user_stack_page(config, stack_capture_size, copy_start_ns, &stack, &stack_page_start, &read_size))
+		copy_user_stack_page(config, stack_capture_size, copy_start_ns, &stack, &stack_page_start, &read_size);
+#else
 #pragma clang loop unroll(full)
 	for (i = 0; i < MAX_STACK_CAPTURE_PAGES; i++) {
 		if (read_size >= stack_capture_size)
@@ -195,17 +241,24 @@ static __always_inline int read_user_stack(struct stack_capture_config *config, 
 		}
 	}
 
+#endif
 	return read_size;
 }
 
 static __always_inline void fill_kernel_stack(void *raw_ctx, struct stack_event *event)
 {
+#ifdef CPA_LITE
+	event->kstack_sz = 0;
+	event->kstack_id = bpf_get_stackid(raw_ctx, &stacks, BPF_F_REUSE_STACKID);
+#else
 	int kstack_bytes = bpf_get_stack(raw_ctx, event->kstack, sizeof(event->kstack), 0);
 
+	event->kstack_id = -1;
 	if (kstack_bytes > 0)
 		event->kstack_sz = kstack_bytes / sizeof(unsigned long);
 	else
 		event->kstack_sz = 0;
+#endif
 }
 
 #define KERNEL_PF_KTHREAD 0x00200000
@@ -476,6 +529,10 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 	 * CO-RE probes helper availability at load time. Older targets simply
 	 * omit the FP stack rather than failing the whole capture path.
 	 */
+#ifdef CPA_LITE
+	/* no bpf_get_stack: libgunwinder walks the copied stack by DWARF */
+	event->ustack_fp_size = 0;
+#else
 	if (bpf_core_enum_value_exists(enum bpf_func_id, BPF_FUNC_get_stack)) {
 		int ustack_fp_size = bpf_get_stack(ctx, event->ustack_fp, sizeof(event->ustack_fp), BPF_F_USER_STACK);
 
@@ -486,6 +543,7 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 	} else {
 		event->ustack_fp_size = 0;
 	}
+#endif
 
 	u64 stack_ptr = (u64)BPF_CORE_READ(cur, stack);
 	if (!stack_ptr) {

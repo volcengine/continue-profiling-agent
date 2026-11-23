@@ -83,6 +83,12 @@ int set_stack_capture_size(int size);
 /* Create the on-CPU stack capture pipeline. */
 int setup_stack_capture_event(int freq, bpf_event_process_fn fn, struct stack_capture_ctx *user_ctx);
 
+/*
+ * The kernel stack of a lite-object sample (stack_event::kstack_id) into
+ * @kstack, at most @max_level entries; returns how many, 0 if none.
+ */
+int stack_capture_lookup_kstack(long kstack_id, unsigned long *kstack, int max_level);
+
 /**
  * struct offcpu_capture_ctx - userspace context for off-CPU capture setup
  * @pid: pid/tgid filter, or 0 for all tasks
@@ -98,6 +104,9 @@ int set_offcpu_capture_size(int size);
 
 /* Create the off-CPU capture pipeline. */
 int setup_offcpu_capture_event(int freq, bpf_event_process_fn fn, struct offcpu_capture_ctx *user_ctx);
+
+/* Like stack_capture_lookup_kstack(), for off-CPU samples. */
+int offcpu_capture_lookup_kstack(long kstack_id, unsigned long *kstack, int max_level);
 
 /* Subscribe to process-exit notifications used for pid-context retirement. */
 int setup_process_exit_event(bpf_event_process_fn fn);

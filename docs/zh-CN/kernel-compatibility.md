@@ -47,6 +47,22 @@ upstream fix 让 `copy_from_user_nofault()` 改用更底层的 `__access_ok()`�
 | 5.15 LTS 与 vendor kernel | 仅在 vendor 已回合修复时使用 | 原始报告涉及 5.15；需确认发行版已回合修复。 |
 | 5.10 LTS 或更老版本 | 未验证不建议使用 | 不在 CPA 当前 upstream 支持说明范围内；需先确认 vendor BPF backport 和 BTF/CO-RE 支持。 |
 
+## 5.3 以前的内核（例如 4.14）
+
+5.3 以前的内核不允许 BPF 程序里有循环，每个程序最多 4096 条指令；4.18 以前的内核
+没有 `bpf_get_stack`。在这些内核上，BPF 后端会加载 on-CPU 和 off-CPU 采集对象的
+lite 版本：
+
+- 内核栈用 `bpf_get_stackid` 存进一个 16 MiB 的 stack-trace map，再在用户态取出；
+  相同的栈共用一项，哈希到已占用槽位的新栈会覆盖旧栈，所以那一刻还在队列里的
+  样本可能显示成新的栈；
+- 每个样本最多拷贝 16 KiB 用户栈（DWARF 回溯到拷贝末尾为止）；
+- 不采集帧指针用户栈。
+
+缺少 `bpf_get_stack`，或完整对象加载失败时，会自动改用 lite 对象；这时不使用
+ring buffer 数据通路。已在 4.14.81（x86_64）上验证 on-CPU、off-CPU 和
+只采内核栈三种模式。
+
 对于发行版内核，不要只看 `uname -r`。vendor 经常在不改变 upstream
 major/minor 版本的情况下回合 BPF 和 mm 修复。启用 CPA 前，请检查 vendor 内核
 changelog，确认 upstream fix commit 已包含。

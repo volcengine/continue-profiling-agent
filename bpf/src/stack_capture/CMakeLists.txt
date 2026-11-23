@@ -16,6 +16,17 @@ add_bpf_skeleton(
 add_custom_target(cpa_bpf_skel_stack_capture_ringbuf DEPENDS "${stack_capture_ringbuf_skel}")
 add_dependencies(cpa_bpf_skeletons cpa_bpf_skel_stack_capture_ringbuf)
 
-# The host loader includes both generated skeletons.
+# Lite variant for kernels without bpf_get_stack or bounded loops (4.14).
+add_bpf_skeleton(
+    stack_capture_lite_skel
+    stack_capture_lite_obj
+    stack_capture_lite
+    "${CMAKE_CURRENT_SOURCE_DIR}/stack_capture_lite.bpf.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+)
+add_custom_target(cpa_bpf_skel_stack_capture_lite DEPENDS "${stack_capture_lite_skel}")
+add_dependencies(cpa_bpf_skeletons cpa_bpf_skel_stack_capture_lite)
+
+# The host loader includes every generated skeleton.
 set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/stack_capture.c"
-             APPEND PROPERTY OBJECT_DEPENDS "${stack_capture_ringbuf_skel}")
+             APPEND PROPERTY OBJECT_DEPENDS "${stack_capture_ringbuf_skel}" "${stack_capture_lite_skel}")

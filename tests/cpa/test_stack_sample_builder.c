@@ -144,9 +144,54 @@ static int test_kernel(void)
 	return 0;
 }
 
+static long looked_up_id = -1;
+
+static int fake_lookup(long kstack_id, unsigned long *kstack, int max_level)
+{
+	looked_up_id = kstack_id;
+	if (max_level < 3)
+		return 0;
+	kstack[0] = 0xffffffff81000010UL;
+	kstack[1] = 0xffffffff81000020UL;
+	kstack[2] = 0xffffffff81000030UL;
+	return 3;
+}
+
+/* a lite BPF object sends a stack id, not the kernel stack */
+static int test_kernel_stack_by_id(void)
+{
+	struct cpa_stack_sample_build_config cfg = { .freq = 99, .kernel_comm = "[kernel]",
+						     .lookup_kstack = fake_lookup };
+	struct stack_event *e = make_event(16);
+	struct stack_sample *s;
+
+	e->kstack_sz = 0;
+	e->kstack_id = 42;
+	s = cpa_stack_sample_build_user(e, (const char *)(e + 1), &cfg);
+	CHECK(s && looked_up_id == 42, "stack id not looked up");
+	CHECK(s->kstack_fp_level == 3 && s->kstack_fp[2] == 0xffffffff81000030UL,
+	      "kernel stack from the id: %lu", s->kstack_fp_level);
+	cpa_sample_free(s);
+
+	/* an inline stack wins; no id (-1) means no stack */
+	looked_up_id = -1;
+	e->kstack_sz = 1;
+	s = cpa_stack_sample_build_kernel(e, false, &cfg);
+	CHECK(s && looked_up_id == -1 && s->kstack_fp_level == 1, "inline kernel stack");
+	cpa_sample_free(s);
+	e->kstack_sz = 0;
+	e->kstack_id = -1;
+	s = cpa_stack_sample_build_kernel(e, false, &cfg);
+	CHECK(s && looked_up_id == -1 && s->kstack_fp_level == 0, "no kernel stack");
+	cpa_sample_free(s);
+	free(e);
+	return 0;
+}
+
 int main(void)
 {
-	if (test_pool() || test_on_cpu() || test_off_cpu() || test_kernel())
+	if (test_pool() || test_on_cpu() || test_off_cpu() || test_kernel() ||
+	    test_kernel_stack_by_id())
 		return 1;
 	puts("stack sample builder ok");
 	return 0;

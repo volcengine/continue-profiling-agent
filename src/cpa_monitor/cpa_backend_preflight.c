@@ -228,11 +228,37 @@ static int cpa_probe_common_stack_maps(char *reason, size_t reason_sz)
 	return 0;
 }
 
+static bool cpa_helper_supported(enum bpf_prog_type prog_type, enum bpf_func_id helper_id)
+{
+	return libbpf_probe_bpf_helper(prog_type, helper_id, NULL) > 0;
+}
+
+/* Either helper will do: the first, or the older one it replaces. */
+static int cpa_probe_helper_or(enum bpf_prog_type prog_type, enum bpf_func_id helper_id,
+			       enum bpf_func_id older_id, const char *prog_name,
+			       const char *helper_name, const char *older_name,
+			       char *reason, size_t reason_sz)
+{
+	if (cpa_helper_supported(prog_type, helper_id) || cpa_helper_supported(prog_type, older_id))
+		return 0;
+
+	cpa_append_reason(reason, reason_sz, "missing BPF helpers %s and %s for %s programs",
+			  helper_name, older_name, prog_name);
+	return -EOPNOTSUPP;
+}
+
+/*
+ * What the capture objects need.  Kernels before 4.18 have no
+ * bpf_get_stack and before 5.5 no bpf_probe_read_{user,kernel}: the lite
+ * objects take kernel stacks with bpf_get_stackid, and libbpf turns the
+ * user/kernel reads into bpf_probe_read there.
+ */
 static int cpa_probe_stack_helpers(enum bpf_prog_type prog_type, const char *prog_name, char *reason, size_t reason_sz)
 {
 	int ret;
 
-	ret = cpa_probe_helper(prog_type, BPF_FUNC_get_stack, prog_name, "bpf_get_stack", reason, reason_sz);
+	ret = cpa_probe_helper_or(prog_type, BPF_FUNC_get_stack, BPF_FUNC_get_stackid, prog_name,
+				  "bpf_get_stack", "bpf_get_stackid", reason, reason_sz);
 	if (ret)
 		return ret;
 
@@ -240,11 +266,13 @@ static int cpa_probe_stack_helpers(enum bpf_prog_type prog_type, const char *pro
 	if (ret)
 		return ret;
 
-	ret = cpa_probe_helper(prog_type, BPF_FUNC_probe_read_user, prog_name, "bpf_probe_read_user", reason, reason_sz);
+	ret = cpa_probe_helper_or(prog_type, BPF_FUNC_probe_read_user, BPF_FUNC_probe_read, prog_name,
+				  "bpf_probe_read_user", "bpf_probe_read", reason, reason_sz);
 	if (ret)
 		return ret;
 
-	ret = cpa_probe_helper(prog_type, BPF_FUNC_probe_read_kernel, prog_name, "bpf_probe_read_kernel", reason, reason_sz);
+	ret = cpa_probe_helper_or(prog_type, BPF_FUNC_probe_read_kernel, BPF_FUNC_probe_read, prog_name,
+				  "bpf_probe_read_kernel", "bpf_probe_read", reason, reason_sz);
 	if (ret)
 		return ret;
 

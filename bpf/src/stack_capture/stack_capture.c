@@ -3,6 +3,7 @@
 
 #include <stack_capture.skel.h>
 #include <stack_capture_ringbuf.skel.h>
+#include <stack_capture_lite.skel.h>
 #include <linux/perf_event.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -27,8 +28,10 @@
 
 static struct stack_capture_bpf *obj;
 static struct stack_capture_ringbuf_bpf *rb_obj;
+static struct stack_capture_lite_bpf *lite_obj;
 static struct bpf_object *sc_obj;
 static bool use_ringbuf;
+static bool use_lite;
 /* 0 = auto, 1 = force perfbuf, 2 = force ringbuf. */
 static int datapath_requested;
 static unsigned int ring_size_bytes = 16U * 1024U * 1024U;
@@ -50,6 +53,7 @@ static int sc_map_fd(const char *name)
 	return bpf_map__fd(bpf_object__find_map_by_name(sc_obj, name));
 }
 static int perf_output_events, percpu_config, stack_content_buf;
+static int stacks_fd = -1;
 static int kernel_event_buf;
 static int comm_stack_limit_fd = -1;
 static pthread_mutex_t comm_stack_limit_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -91,56 +95,116 @@ static void sc_preload_resize(struct bpf_object *bo, bool ring)
 			ring_size_bytes);
 }
 
+static bool get_stack_supported(void)
+{
+	return libbpf_probe_bpf_helper(BPF_PROG_TYPE_PERF_EVENT,
+				       BPF_FUNC_get_stack, NULL) > 0;
+}
+
+static int load_ringbuf(const struct bpf_object_open_opts *optsp)
+{
+	int ret;
+
+	rb_obj = stack_capture_ringbuf_bpf__open_opts(optsp);
+	if (!rb_obj)
+		return -1;
+	sc_preload_resize(rb_obj->obj, true);
+	if (!coredump_capture_enabled)
+		bpf_program__set_autoload(rb_obj->progs.stack_capture_coredump, false);
+	ret = stack_capture_ringbuf_bpf__load(rb_obj);
+	if (ret) {
+		stack_capture_ringbuf_bpf__destroy(rb_obj);
+		rb_obj = NULL;
+		return ret;
+	}
+	sc_obj = rb_obj->obj;
+	use_ringbuf = true;
+	return 0;
+}
+
+static int load_perfbuf(const struct bpf_object_open_opts *optsp)
+{
+	int ret;
+
+	obj = stack_capture_bpf__open_opts(optsp);
+	if (!obj)
+		return -1;
+	sc_preload_resize(obj->obj, false);
+	if (!coredump_capture_enabled)
+		bpf_program__set_autoload(obj->progs.stack_capture_coredump, false);
+	ret = stack_capture_bpf__load(obj);
+	if (ret) {
+		stack_capture_bpf__destroy(obj);
+		obj = NULL;
+		return ret;
+	}
+	sc_obj = obj->obj;
+	return 0;
+}
+
+static int load_lite(const struct bpf_object_open_opts *optsp)
+{
+	int ret;
+
+	lite_obj = stack_capture_lite_bpf__open_opts(optsp);
+	if (!lite_obj)
+		return -1;
+	sc_preload_resize(lite_obj->obj, false);
+	if (!coredump_capture_enabled)
+		bpf_program__set_autoload(lite_obj->progs.stack_capture_coredump, false);
+	ret = stack_capture_lite_bpf__load(lite_obj);
+	if (ret) {
+		stack_capture_lite_bpf__destroy(lite_obj);
+		lite_obj = NULL;
+		return ret;
+	}
+	sc_obj = lite_obj->obj;
+	use_lite = true;
+	return 0;
+}
+
+/*
+ * Three objects, best first: ringbuf (5.8+), perfbuf, and lite for kernels
+ * without bpf_get_stack or bounded loops (before 5.3, e.g. 4.14): kernel
+ * stacks by stack id, a 16 KiB user-stack window and no frame-pointer user
+ * stack.  A kernel without bpf_get_stack goes to lite directly; otherwise
+ * lite is the last resort when the perfbuf object does not load.
+ */
 static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 {
+	bool has_get_stack = get_stack_supported();
 	bool try_ringbuf = datapath_requested == 2 ||
-			   (datapath_requested == 0 && ringbuf_map_supported());
+			   (datapath_requested == 0 && has_get_stack &&
+			    ringbuf_map_supported());
+	int ret = -1;
 
 	if (try_ringbuf) {
-		rb_obj = stack_capture_ringbuf_bpf__open_opts(optsp);
-		if (!rb_obj) {
-			if (datapath_requested == 2) {
-				BPF_ERR("ringbuf bpf open failed func=%s\n", __func__);
-				return -1;
-			}
-			BPF_INFO("ringbuf open failed, falling back to perf buffer\n");
-		} else {
-			sc_preload_resize(rb_obj->obj, true);
-			if (!coredump_capture_enabled)
-				bpf_program__set_autoload(
-					rb_obj->progs.stack_capture_coredump, false);
-			int ret = stack_capture_ringbuf_bpf__load(rb_obj);
-			if (ret) {
-				stack_capture_ringbuf_bpf__destroy(rb_obj);
-				rb_obj = NULL;
-				if (datapath_requested == 2) {
-					BPF_ERR("ringbuf bpf load failed ret=%d\n", ret);
-					return ret;
-				}
-				BPF_INFO("ringbuf load failed ret=%d, falling back\n", ret);
-			} else {
-				use_ringbuf = true;
-			}
-		}
-	}
-
-	if (!use_ringbuf) {
-		obj = stack_capture_bpf__open_opts(optsp);
-		if (!obj) {
-			BPF_ERR("bpf open failed func=%s\n", __func__);
-			return -1;
-		}
-		sc_preload_resize(obj->obj, false);
-		if (!coredump_capture_enabled)
-			bpf_program__set_autoload(obj->progs.stack_capture_coredump, false);
-		int ret = stack_capture_bpf__load(obj);
-		if (ret) {
-			BPF_ERR("bpf load failed func=%s\n", __func__);
+		ret = load_ringbuf(optsp);
+		if (ret && datapath_requested == 2) {
+			BPF_ERR("ringbuf bpf load failed ret=%d\n", ret);
 			return ret;
 		}
+		if (ret)
+			BPF_INFO("ringbuf load failed ret=%d, falling back to perf buffer\n", ret);
 	}
 
-	sc_obj = use_ringbuf ? rb_obj->obj : obj->obj;
+	if (!sc_obj && has_get_stack) {
+		ret = load_perfbuf(optsp);
+		if (ret)
+			BPF_WARN("bpf load failed ret=%d, trying the lite object\n", ret);
+	}
+
+	if (!sc_obj) {
+		ret = load_lite(optsp);
+		if (ret) {
+			BPF_ERR("bpf load failed func=%s ret=%d\n", __func__, ret);
+			return ret;
+		}
+		/* a downgrade: say what is lost */
+		BPF_WARN("stack_capture: %s, using the lite object: kernel stacks by stack id, "
+			 "user stack copy limited to 16 KiB, no frame-pointer user stack\n",
+			 has_get_stack ? "the full object did not load" : "no bpf_get_stack");
+	}
 
 	links = (struct bpf_link **)calloc(libbpf_num_possible_cpus(), sizeof(struct bpf_link *));
 	if (!links) {
@@ -152,9 +216,11 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 	kernel_event_buf = sc_map_fd("kernel_event_buf");
 	comm_stack_limit_fd = sc_map_fd("comm_stack_limit");
 	percpu_config = sc_map_fd("percpu_config");
+	stacks_fd = use_lite ? sc_map_fd("stacks") : -1;
 	perf_output_events = use_ringbuf ? sc_map_fd("events_rb")
 				       : sc_map_fd("perf_output_events");
-	BPF_INFO("stack_capture datapath=%s ring_size=%u\n",
+	BPF_INFO("stack_capture object=%s datapath=%s ring_size=%u\n",
+		 use_lite ? "lite" : "full",
 		 use_ringbuf ? "ringbuf" : "perfbuf",
 		 use_ringbuf ? ring_size_bytes : 0);
 	return 0;
@@ -166,7 +232,7 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 static void exit_bpf_module(void)
 {
 	int i = 0;
-	if (!obj)
+	if (!sc_obj)
 		return;
 
 	(void)stack_capture_clear_comm_stack_limits();
@@ -191,17 +257,44 @@ static void exit_bpf_module(void)
 		free(percpu_config_buf);
 
 	if (use_ringbuf) {
-bpf_event_poll_unregister_no_free(perf_output_events);
-stack_capture_ringbuf_bpf__destroy(rb_obj);
-rb_obj = NULL;
-} else {
-bpf_event_poll_unregister(perf_output_events, stack_capture_bpf__destroy(obj));
+		bpf_event_poll_unregister_no_free(perf_output_events);
+		stack_capture_ringbuf_bpf__destroy(rb_obj);
+		rb_obj = NULL;
+	} else if (use_lite) {
+		bpf_event_poll_unregister(perf_output_events, stack_capture_lite_bpf__destroy(lite_obj));
+		lite_obj = NULL;
+	} else {
+		bpf_event_poll_unregister(perf_output_events, stack_capture_bpf__destroy(obj));
+		obj = NULL;
+	}
+	sc_obj = NULL;
+	use_ringbuf = false;
+	use_lite = false;
+	stacks_fd = -1;
 }
-sc_obj = NULL;
-use_ringbuf = false;
 
+/*
+ * A lite object's samples carry a stack id instead of the kernel stack;
+ * copy the stack out of its map.  Returns the number of entries, 0 if the
+ * id does not resolve.  Entries are never deleted: with
+ * BPF_F_REUSE_STACKID the map is a fixed table where a new stack replaces
+ * the one in its bucket, so it never fills; a sample still queued when its
+ * bucket is replaced gets the newer stack (accepted on these kernels).
+ */
+int stack_capture_lookup_kstack(long kstack_id, unsigned long *kstack, int max_level)
+{
+	unsigned long ips[MAX_KERNEL_STACK_LEVEL] = { 0 };
+	__u32 key = (__u32)kstack_id;
+	int n = 0;
 
-	obj = NULL;
+	if (stacks_fd < 0 || kstack_id < 0 || !kstack || max_level <= 0)
+		return 0;
+	if (bpf_map_lookup_elem(stacks_fd, &key, ips))
+		return 0;
+	while (n < max_level && n < MAX_KERNEL_STACK_LEVEL && ips[n])
+		n++;
+	memcpy(kstack, ips, n * sizeof(ips[0]));
+	return n;
 }
 
 BPF_MODULE(stack_capture, "4.14");

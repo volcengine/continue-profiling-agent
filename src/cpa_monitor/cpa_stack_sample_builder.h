@@ -23,11 +23,14 @@
  * @offcpu: events come from offcpu_capture
  * @freq: sampling frequency, to weigh IRQ-off samples
  * @kernel_comm: group comm given to kernel threads
+ * @lookup_kstack: resolves stack_event::kstack_id when the event carries
+ *                 no kernel stack (lite BPF objects), or NULL
  */
 struct cpa_stack_sample_build_config {
 	bool offcpu;
 	unsigned int freq;
 	const char *kernel_comm;
+	int (*lookup_kstack)(long kstack_id, unsigned long *kstack, int max_level);
 };
 
 /**

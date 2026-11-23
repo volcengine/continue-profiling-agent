@@ -757,11 +757,22 @@ void cpa_emit_kernel_only_sample(const struct stack_event *event, unsigned int s
 		cli_stackmap_entry_reverse_ids(trace_stackmap);
 	}
 
-	if (!event->user_mode && event->kstack_sz == 0)
+	/* a lite BPF object sends a stack id instead of the stack */
+	const unsigned long *kstack = event->kstack;
+	unsigned long kstack_by_id[MAX_KERNEL_STACK_LEVEL];
+	int kstack_level = event->kstack_sz;
+
+	if (kstack_level == 0 && event->kstack_id >= 0) {
+		kstack_level = stack_capture_lookup_kstack(event->kstack_id, kstack_by_id,
+							   MAX_KERNEL_STACK_LEVEL);
+		kstack = kstack_by_id;
+	}
+
+	if (!event->user_mode && kstack_level == 0)
 		cli_stackmap_append(trace_stackmap, "kernel_drop_stack_[k]");
 
-	for (int i = 0; i < event->kstack_sz && i < MAX_KERNEL_STACK_LEVEL; i++) {
-		cpa_resolve_kernel_symbol(event->kstack[i], single_ksym, sizeof(single_ksym));
+	for (int i = 0; i < kstack_level && i < MAX_KERNEL_STACK_LEVEL; i++) {
+		cpa_resolve_kernel_symbol(kstack[i], single_ksym, sizeof(single_ksym));
 		cli_stackmap_append(trace_stackmap, single_ksym);
 	}
 

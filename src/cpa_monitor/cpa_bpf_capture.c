@@ -293,6 +293,8 @@ static void stack_capture_event_process(void *event, unsigned int size, void *us
 		.offcpu = offcpu,
 		.freq = bpf_capture_config.freq,
 		.kernel_comm = kernel_comm,
+		.lookup_kstack = offcpu ? offcpu_capture_lookup_kstack
+					: stack_capture_lookup_kstack,
 	};
 
 	if (e->type & STACK_EVENT_KTHREAD || drop_state != DROP_SAMPLE_RESULT_PASS)

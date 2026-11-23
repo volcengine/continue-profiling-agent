@@ -87,6 +87,12 @@ struct stack_event {
 	unsigned char user_mode;
 	unsigned char reserved0;
 	unsigned long kstack[MAX_KERNEL_STACK_LEVEL];
+	/*
+	 * Lite programs (kernels without bpf_get_stack) leave @kstack empty and
+	 * store the kernel stack in their stack-trace map under this id; -1
+	 * when there is none.
+	 */
+	long kstack_id;
 	unsigned int stack_size;
 	char comm[TASK_COMM_LEN];
 	char group_comm[TASK_COMM_LEN];

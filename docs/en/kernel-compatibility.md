@@ -48,6 +48,25 @@ References:
 | 5.15 LTS and vendor kernels | Vendor-patched only | The original report involved 5.15; use only when your vendor confirms the fix is backported. |
 | 5.10 LTS or older | Not recommended without validation | Outside CPA's documented upstream support window; check vendor BPF backports and BTF/CO-RE support first. |
 
+## Kernels Before 5.3 (for example 4.14)
+
+Kernels before 5.3 accept no loops and at most 4096 instructions per BPF
+program, and kernels before 4.18 have no `bpf_get_stack`. On such kernels the
+BPF backend loads a lite variant of the on-CPU and off-CPU capture objects:
+
+- kernel stacks are taken with `bpf_get_stackid` into a 16 MiB stack-trace
+  map and resolved in user space; identical stacks share one entry, and a
+  stack that hashes to an occupied bucket replaces it, so a sample still
+  queued at that moment can show the newer stack;
+- at most 16 KiB of the user stack is copied per sample (DWARF unwinding
+  stops where the copy ends);
+- no frame-pointer user stack is captured.
+
+The lite objects are chosen automatically when `bpf_get_stack` is missing, or
+when the full object fails to load. The ring-buffer datapath is not used
+there. Validated on 4.14.81 (x86_64) with on-CPU, off-CPU and kernel-only
+sampling.
+
 For distribution kernels, do not rely only on `uname -r`. Vendors often
 backport BPF and mm fixes without changing the upstream major/minor version.
 Check the vendor kernel changelog for the upstream fix commit before enabling
