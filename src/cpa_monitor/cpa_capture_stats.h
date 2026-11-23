@@ -17,6 +17,8 @@
  */
 struct cpa_capture_stats {
 	uint64_t lost_events;
+	/* EXIT NONZERO events received (BPF backend) */
+	uint64_t exit_capture_count;
 };
 
 /**

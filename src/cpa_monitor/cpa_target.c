@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -339,5 +340,151 @@ int cpa_target_parse(const struct cpa_target_raw *raw, struct cpa_target_spec *o
 	}
 
 	build_summary(out);
+	return 0;
+}
+
+/* ------------------------------------------------------------ exit -- */
+
+static int add_exit_comm(const char *item, void *ctx, char *err, size_t errlen)
+{
+	struct cpa_exit_spec *spec = ctx;
+	int ret = check_comm(item, "exit_comm", err, errlen);
+
+	if (ret)
+		return ret;
+	for (int i = 0; i < spec->n_comms; i++)
+		if (strcmp(spec->comms[i], item) == 0)
+			return 0;
+	if (spec->n_comms >= CPA_TARGET_MAX_COMMS)
+		return fail(err, errlen, "--exit_comm: at most %d names",
+			    CPA_TARGET_MAX_COMMS);
+	memset(spec->comms[spec->n_comms], 0, CPA_TARGET_COMM_LEN);
+	memcpy(spec->comms[spec->n_comms], item, strlen(item));
+	spec->n_comms++;
+	return 0;
+}
+
+static int add_exit_pid(const char *item, void *ctx, char *err, size_t errlen)
+{
+	struct cpa_exit_spec *spec = ctx;
+	long pid;
+
+	if (parse_positive(item, INT32_MAX, &pid))
+		return fail(err, errlen, "--exit_pid: invalid pid '%s'", item);
+	for (int i = 0; i < spec->n_pids; i++)
+		if (spec->pids[i] == (uint32_t)pid)
+			return 0;
+	if (spec->n_pids >= CPA_TARGET_MAX_PIDS)
+		return fail(err, errlen, "--exit_pid: at most %d pids",
+			    CPA_TARGET_MAX_PIDS);
+	spec->pids[spec->n_pids++] = (uint32_t)pid;
+	return 0;
+}
+
+static int add_exit_env_name(const char *item, void *ctx, char *err,
+			     size_t errlen)
+{
+	struct cpa_exit_spec *spec = ctx;
+
+	if (strlen(item) >= CPA_EXIT_ENV_NAME_LEN || strchr(item, '='))
+		return fail(err, errlen,
+			    "--exit_target_env_name: invalid name '%s' (no '=', "
+			    "at most %d bytes)", item, CPA_EXIT_ENV_NAME_LEN - 1);
+	for (int i = 0; i < spec->n_env_names; i++)
+		if (strcmp(spec->env_names[i], item) == 0)
+			return 0;
+	if (spec->n_env_names >= CPA_EXIT_MAX_ENV_NAMES)
+		return fail(err, errlen, "--exit_target_env_name: at most %d names",
+			    CPA_EXIT_MAX_ENV_NAMES);
+	snprintf(spec->env_names[spec->n_env_names++], CPA_EXIT_ENV_NAME_LEN,
+		 "%s", item);
+	return 0;
+}
+
+static int add_env_value(const char *opt, const char *item,
+			 char list[][CPA_EXIT_ENV_VALUE_LEN], int *n, char *err,
+			 size_t errlen)
+{
+	if (strlen(item) >= CPA_EXIT_ENV_VALUE_LEN)
+		return fail(err, errlen, "--%s: '%s' is longer than %d bytes",
+			    opt, item, CPA_EXIT_ENV_VALUE_LEN - 1);
+	for (int i = 0; i < *n; i++)
+		if (strcmp(list[i], item) == 0)
+			return 0;
+	if (*n >= CPA_EXIT_MAX_ENV_VALUES)
+		return fail(err, errlen, "--%s: at most %d values", opt,
+			    CPA_EXIT_MAX_ENV_VALUES);
+	snprintf(list[(*n)++], CPA_EXIT_ENV_VALUE_LEN, "%s", item);
+	return 0;
+}
+
+static int add_exit_env_value(const char *item, void *ctx, char *err,
+			      size_t errlen)
+{
+	struct cpa_exit_spec *spec = ctx;
+
+	return add_env_value("exit_target_env_values", item, spec->env_values,
+			     &spec->n_env_values, err, errlen);
+}
+
+static int add_exit_env_prefix(const char *item, void *ctx, char *err,
+			       size_t errlen)
+{
+	struct cpa_exit_spec *spec = ctx;
+
+	return add_env_value("exit_target_env_value_prefix", item,
+			     spec->env_prefixes, &spec->n_env_prefixes, err,
+			     errlen);
+}
+
+int cpa_exit_parse(const struct cpa_exit_raw *raw, struct cpa_exit_spec *out,
+		   char *err, size_t errlen)
+{
+	static const struct {
+		size_t raw_off;
+		const char *opt;
+		int (*add)(const char *, void *, char *, size_t);
+	} items[] = {
+		{ offsetof(struct cpa_exit_raw, comm), "exit_comm", add_exit_comm },
+		{ offsetof(struct cpa_exit_raw, pid), "exit_pid", add_exit_pid },
+		{ offsetof(struct cpa_exit_raw, env_name), "exit_target_env_name", add_exit_env_name },
+		{ offsetof(struct cpa_exit_raw, env_values), "exit_target_env_values", add_exit_env_value },
+		{ offsetof(struct cpa_exit_raw, env_value_prefix), "exit_target_env_value_prefix", add_exit_env_prefix },
+	};
+
+	if (!raw || !out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	if (err && errlen)
+		err[0] = '\0';
+
+	for (size_t i = 0; i < sizeof(items) / sizeof(items[0]); i++) {
+		const char *value = *(const char *const *)((const char *)raw + items[i].raw_off);
+		int ret;
+
+		if (!arg_set(value))
+			continue;
+		ret = for_each_item(value, err, errlen, items[i].opt, items[i].add, out);
+		if (ret)
+			return ret;
+	}
+	if (out->n_comms && out->n_pids)
+		return fail(err, errlen,
+			    "--exit_pid selects processes directly; it cannot be "
+			    "combined with --exit_comm");
+	if (out->n_env_names && !out->n_env_values && !out->n_env_prefixes)
+		return fail(err, errlen,
+			    "--exit_target_env_name needs --exit_target_env_values "
+			    "or --exit_target_env_value_prefix");
+	if (!out->n_env_names && (out->n_env_values || out->n_env_prefixes))
+		return fail(err, errlen,
+			    "--exit_target_env_values / "
+			    "--exit_target_env_value_prefix need "
+			    "--exit_target_env_name");
+	/* only an own selection has a moment of selection to read at */
+	if (out->n_env_names && !cpa_exit_has_targets(out))
+		return fail(err, errlen,
+			    "--exit_target_env_name requires --exit_comm or "
+			    "--exit_pid");
 	return 0;
 }

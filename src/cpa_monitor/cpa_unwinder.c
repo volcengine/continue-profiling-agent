@@ -27,6 +27,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 /**
  * @file cpa_unwinder.c
@@ -353,6 +354,8 @@ struct unwind_worker {
 	struct cpa_frames frames;
 	char frame_buf[FRAME_NAME_BUF_SIZE];
 	char base_info[CPA_BASE_INFO_LEN];
+	/* the sample being unwound is a crash or an exit: crash-level frames */
+	bool verbose_frames;
 	/* when the next queued exit of the lane may be ready, 0 = none */
 	uint64_t exit_deadline_ns;
 	struct exit_event *exit_batch[CPA_PID_EXIT_DRAIN_BATCH];
@@ -760,6 +763,53 @@ static unsigned long cpa_stack_count_from_event(const struct stack_event *event,
 	return count;
 }
 
+/* A GNU build-id (20 bytes); libgunwinder's MD5 fallback is not one. */
+#define CPA_GNU_BUILD_ID_LEN 20
+
+/*
+ * " [build-id=<hex>]" for an ELF with a GNU build-id, empty otherwise: the
+ * MD5 digest libgunwinder falls back to is a cache key, and `cpa show
+ * --list-core` looks build-ids up in /usr/lib/debug/.build-id.
+ */
+static void format_build_id_suffix(const struct gu_elf_info *elf_info, char *buf, size_t size)
+{
+	size_t pos;
+
+	buf[0] = '\0';
+	if (!elf_info || !elf_info->build_id || elf_info->build_id_len != CPA_GNU_BUILD_ID_LEN)
+		return;
+	if (size < sizeof(" [build-id=]") + CPA_GNU_BUILD_ID_LEN * 2)
+		return;
+	pos = snprintf(buf, size, " [build-id=");
+	for (int i = 0; i < CPA_GNU_BUILD_ID_LEN; i++)
+		pos += snprintf(buf + pos, size - pos, "%02x", elf_info->build_id[i]);
+	snprintf(buf + pos, size - pos, "]");
+}
+
+/*
+ * Crash-level frame of a COREDUMP or EXIT sample: symbol+offset, absolute
+ * and file-relative pc, build-id and the full path, so `cpa show
+ * --list-core --core-verbose` can resolve it offline.
+ */
+static void format_verbose_frame(const struct gu_frame_record *frame, char *buf)
+{
+	char build_id[64];
+	const char *path = frame->elf_info ? frame->elf_info->elf_file_path : NULL;
+
+	format_build_id_suffix(frame->elf_info, build_id, sizeof(build_id));
+	if (!frame->elf_info)
+		snprintf(buf, FRAME_NAME_BUF_SIZE, "0x%lx [pc=0x%lx] [%s]", frame->abs_pc, frame->pc, "anon exec segment");
+	else if (!frame->symbol || disable_sym)
+		snprintf(buf, FRAME_NAME_BUF_SIZE, "0x%lx [pc=0x%lx]%s [%s]", frame->abs_pc, frame->pc, build_id,
+			 path ? path : frame->elf_info->base_name);
+	else if (path)
+		snprintf(buf, FRAME_NAME_BUF_SIZE, "%s+0x%lx @0x%lx [pc=0x%lx]%s [%s]", frame->symbol, frame->offset,
+			 frame->abs_pc, frame->pc, build_id, path);
+	else
+		snprintf(buf, FRAME_NAME_BUF_SIZE, "%s+0x%lx @0x%lx [pc=0x%lx]%s", frame->symbol, frame->offset,
+			 frame->abs_pc, frame->pc, build_id);
+}
+
 /**
  * Append one symbolized user frame to the worker's frames.
  */
@@ -767,6 +817,12 @@ static void process_single_frame_p(const struct gu_frame_record *frame, void *cb
 {
 	struct unwind_worker *w = cb_ctx;
 	char *buf = w->frame_buf;
+
+	if (w->verbose_frames) {
+		format_verbose_frame(frame, buf);
+		cpa_frames_append(&w->frames, buf);
+		return;
+	}
 
 	if (disable_sym) {
 		if (!frame->elf_info)
@@ -923,12 +979,13 @@ static void cpa_unwind(struct unwind_worker *w, struct stack_sample *sample)
 	struct cli_stackmap *trace_stackmap;
 	bool backtrace_user = true;
 	int backtrace_ret = GU_UNWIND_REASON_OK;
-	char marker[64];
+	char marker[128];
 
 	if (!sample)
 		return;
 
 	cpa_frames_clear(frames);
+	w->verbose_frames = sample->type & (STACK_EVENT_COREDUMP | STACK_EVENT_EXIT_NONZERO);
 	char *env_name = cpa_get_pid_env(w->ctx, sample);
 	generate_metadata(w->base_info, CPA_BASE_INFO_LEN, sample->comm, sample->group_comm, sample->cgid, sample->cpu, sample->pid, env_name);
 
@@ -949,6 +1006,23 @@ static void cpa_unwind(struct unwind_worker *w, struct stack_sample *sample)
 
 	if (sample->type & STACK_EVENT_COREDUMP) {
 		snprintf(marker, sizeof(marker), "<# COREDUMP %s code=%d #>", cpa_signal_name(sample->signal), sample->signal_code);
+		cpa_frames_marker(frames, marker);
+	}
+
+	/*
+	 * The raw code is the kernel's wait(2) status word: N << 8 for exit(N),
+	 * the signal number for a fatal signal, | 0x80 when it dumped core.
+	 */
+	if (sample->type & STACK_EVENT_EXIT_NONZERO) {
+		int raw = sample->signal;
+
+		if (WIFEXITED(raw))
+			snprintf(marker, sizeof(marker), "<# EXIT NONZERO raw=%d exit=%d #>", raw, WEXITSTATUS(raw));
+		else if (WIFSIGNALED(raw))
+			snprintf(marker, sizeof(marker), "<# EXIT NONZERO raw=%d sig=%d core=%d #>", raw, WTERMSIG(raw),
+				 WCOREDUMP(raw) ? 1 : 0);
+		else
+			snprintf(marker, sizeof(marker), "<# EXIT NONZERO raw=%d #>", raw);
 		cpa_frames_marker(frames, marker);
 	}
 

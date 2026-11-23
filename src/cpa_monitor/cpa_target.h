@@ -81,4 +81,48 @@ int cpa_target_parse(const struct cpa_target_raw *raw, struct cpa_target_spec *o
 /* True when @spec selects by rules (comm / cgroup / exe / container). */
 bool cpa_target_has_rules(const struct cpa_target_spec *spec);
 
+/*
+ * Exit capture's own selection (--exit_comm / --exit_pid) and its
+ * environment condition (--exit_target_env_*).
+ */
+#define CPA_EXIT_MAX_ENV_NAMES 4
+#define CPA_EXIT_MAX_ENV_VALUES 16
+#define CPA_EXIT_ENV_NAME_LEN 64
+#define CPA_EXIT_ENV_VALUE_LEN 256
+
+struct cpa_exit_raw {
+	const char *comm;
+	const char *pid;
+	const char *env_name;
+	const char *env_values;
+	const char *env_value_prefix;
+};
+
+struct cpa_exit_spec {
+	char comms[CPA_TARGET_MAX_COMMS][CPA_TARGET_COMM_LEN];
+	int n_comms;
+	uint32_t pids[CPA_TARGET_MAX_PIDS];
+	int n_pids;
+	char env_names[CPA_EXIT_MAX_ENV_NAMES][CPA_EXIT_ENV_NAME_LEN];
+	int n_env_names;
+	char env_values[CPA_EXIT_MAX_ENV_VALUES][CPA_EXIT_ENV_VALUE_LEN];
+	int n_env_values;
+	char env_prefixes[CPA_EXIT_MAX_ENV_VALUES][CPA_EXIT_ENV_VALUE_LEN];
+	int n_env_prefixes;
+};
+
+/* Returns 0 on success; -EINVAL with a message in @err otherwise. */
+int cpa_exit_parse(const struct cpa_exit_raw *raw, struct cpa_exit_spec *out,
+		   char *err, size_t errlen);
+
+static inline bool cpa_exit_has_targets(const struct cpa_exit_spec *spec)
+{
+	return spec->n_comms || spec->n_pids;
+}
+
+static inline bool cpa_exit_has_env_cond(const struct cpa_exit_spec *spec)
+{
+	return spec->n_env_names > 0;
+}
+
 #endif

@@ -51,9 +51,12 @@ static void cpa_mode_init(struct cpa_monitor_mode *mode, void *ctx)
 	/* every process selection is done in BPF */
 	static const char *const selection_args[] = {
 		"thread_comm", "exe", "cgroup", "container_pid", "startup_window",
+		"exit_comm", "exit_pid", "exit_target_env_name",
+		"exit_target_env_values", "exit_target_env_value_prefix",
 	};
 	static const char *const selection_flags[] = {
 		"cgroup_recursive", "children", "new_only", "first_match",
+		"enable_exit_capture",
 	};
 	for (size_t i = 0; i < sizeof(selection_args) / sizeof(selection_args[0]); i++)
 		if (!cli_arg_is_null_default(get_arg_by_name(ctx, selection_args[i])))
@@ -449,7 +452,7 @@ static bool cpa_bpf_mode_can_fallback_to_perf(const struct cpa_monitor_mode *mod
 static int cpa_reject_perf_backend(const struct cpa_monitor_mode *mode)
 {
 	if (!strcmp(mode->backend, "perf") && cpa_perf_mode_uses_bpf_only_features(mode)) {
-		CLI_ERROR("perf backend only supports on-cpu continuous profiling; --oneshot, --offcpu, --probe, --kernel_stack, non-default --stack_size and every process selection (--pid, --comm, --thread_comm, --exe, --cgroup, --container_pid, --children, --new_only, --first_match, --startup_window) require bpf backend");
+		CLI_ERROR("perf backend only supports on-cpu continuous profiling; --oneshot, --offcpu, --probe, --kernel_stack, non-default --stack_size and every process selection (--pid, --comm, --thread_comm, --exe, --cgroup, --container_pid, --children, --new_only, --first_match, --startup_window) and exit capture (--enable_exit_capture, --exit_*) require bpf backend");
 		return -EINVAL;
 	}
 

@@ -161,6 +161,7 @@ void cpa_timer_fn(void *worker_ctx)
 		CLI_OUTPUT("File  Queue Len: %d Pid Exit Queue Len: %d Store Dir: %s Total Size: %d KB", 0, 0, dir_info ? dir_info->store_dir : "NULL", dir_size / 1024);
 		CLI_OUTPUT("NO BPF Pid Tracker: tracked pid num: %d retire pid num: %d", pid_tracker_stat.tracked_pid_count, pid_tracker_stat.retired_pid_count);
 		CLI_OUTPUT("Lost Events: bpf perf-buffer=%llu perf mmap=%llu", (unsigned long long)bpf_capture_stat.lost_events, (unsigned long long)perf_capture_stat.lost_events);
+		CLI_OUTPUT("Exit Capture Count: %llu", (unsigned long long)bpf_capture_stat.exit_capture_count);
 		CLI_OUTPUT("RSS   Anon Size: %ld KB   File Size: %ld KB    Total Size: %ld KB", rss.rss_anon, rss.rss_file, rss.rss_sum);
 		CLI_OUTPUT("Ids Alloc Size : %ld KB   Str Alloc Size: %ld KB Ids Array Size: %ld KB Str Array Size: %ld KB", usage->memory_usage_idsmap / 1024, usage->memory_usage_strmap / 1024, usage->memory_usage_idsarray / 1024,
 			   usage->memory_usage_strarray / 1024);

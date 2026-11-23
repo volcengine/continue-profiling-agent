@@ -27,7 +27,7 @@
 struct sub_cmd sub_cmd_cpa_monitor = {
 	.name = "monitor",
 	.arg_list =
-		"store_dir=/var/log/cpa backend=bpf freq=49 record_interval=1 persistent_day=7 oneshot=0 output_prof=cpa.prof pid=0 comm=null thread_comm=null exe=null cgroup=null cgroup_recursive=0 container_pid=null children=0 new_only=0 first_match=0 startup_window=null kernel_stack=0 offcpu=0 enable_coredump_capture=0 datapath=auto ring_size_mb=16 probe=null disable_sym=0 include_full_path=0 strip_name_disable=0 record_env_name=null parse_env_values=null max_queue_size=4096 unwind_workers=1 stack_size=8192 max_cache_size_mb=1024 max_store_size_mb=7168 log_print_cycles=1 bench=0 bpf_exec_time_guard_ms=2 debug_option=null",
+		"store_dir=/var/log/cpa backend=bpf freq=49 record_interval=1 persistent_day=7 oneshot=0 output_prof=cpa.prof pid=0 comm=null thread_comm=null exe=null cgroup=null cgroup_recursive=0 container_pid=null children=0 new_only=0 first_match=0 startup_window=null kernel_stack=0 offcpu=0 enable_coredump_capture=0 enable_exit_capture=0 exit_comm=null exit_pid=null exit_target_env_name=null exit_target_env_values=null exit_target_env_value_prefix=null datapath=auto ring_size_mb=16 probe=null disable_sym=0 include_full_path=0 strip_name_disable=0 record_env_name=null parse_env_values=null max_queue_size=4096 unwind_workers=1 stack_size=8192 max_cache_size_mb=1024 max_store_size_mb=7168 log_print_cycles=1 bench=0 bpf_exec_time_guard_ms=2 debug_option=null",
 	.help_str = "[CPA] collect profile data into rotating stores or a one-shot flamegraph.",
 	.func = SUB_CMD_FUNC(cpa_monitor),
 };

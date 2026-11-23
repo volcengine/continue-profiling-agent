@@ -53,9 +53,11 @@ def test_subcommand_help_flag():
     assert "--background" not in stdout
     assert "--force_fp" not in stdout
     assert "--no_backtrace_lang" not in stdout
-    assert "one-shot" in stdout.lower()
-    assert "flamegraph file path" in stdout.lower()
-    assert "bpf or perf" in stdout.lower()
+    # descriptions wrap at the terminal width: compare words, not lines
+    words = " ".join(stdout.lower().split())
+    assert "one-shot" in words
+    assert "flamegraph file path" in words
+    assert "bpf or perf" in words
 
 
 @pytest.mark.usefixtures("print_test_name")

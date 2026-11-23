@@ -48,6 +48,10 @@ static bool process_exit_enabled = false;
 static bool stack_capture_enabled = false;
 static bool offcpu_capture_enabled = false;
 static bool kernel_only_fastpath = false;
+/* --enable_exit_capture, its own selection, and the EXIT events received */
+static bool exit_capture;
+static struct cpa_exit_spec exit_spec;
+static atomic_ullong exit_capture_count;
 static pthread_mutex_t kernel_only_fastpath_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t kernel_only_fastpath_idle = PTHREAD_COND_INITIALIZER;
 static unsigned int kernel_only_fastpath_active;
@@ -316,6 +320,8 @@ static void stack_capture_event_process(void *event, unsigned int size, void *us
 		CLI_ERROR("out of memory building a stack sample");
 		goto out;
 	}
+	if (e->type & STACK_EVENT_EXIT_NONZERO)
+		atomic_fetch_add_explicit(&exit_capture_count, 1, memory_order_relaxed);
 
 	ret = cpa_add_stack_event(sample);
 
@@ -450,6 +456,17 @@ static enum cpa_worker_init_result cpa_bpf_oncpu_capture_init(void *ctx)
 
 	bool coredump_enabled = atoi(get_arg_by_name(ctx, "enable_coredump_capture")) != 0;
 	stack_capture_set_coredump_capture(coredump_enabled);
+	stack_capture_set_exit_capture(exit_capture);
+	{
+		const char *comms[CPA_TARGET_MAX_COMMS];
+
+		for (int i = 0; i < exit_spec.n_comms; i++)
+			comms[i] = exit_spec.comms[i];
+		if (stack_capture_set_exit_targets(comms, exit_spec.n_comms, exit_spec.pids, exit_spec.n_pids)) {
+			CLI_ERROR("invalid exit capture targets");
+			return CPA_INIT_FAILED;
+		}
+	}
 
 	if (INIT_MODULE_BPF(stack_capture))
 		return CPA_INIT_FAILED;
@@ -513,6 +530,87 @@ stack_capture_init_ctx.enable_coredump_capture = coredump_enabled;
 	return CPA_INIT_SUCCESS;
 }
 
+/* Is @pid the leader of a running process (a tgid, not a thread id)? */
+static bool pid_is_process(uint32_t pid)
+{
+	char path[64], line[256];
+	bool leader = false;
+	FILE *fp;
+
+	snprintf(path, sizeof(path), "/proc/%u/status", pid);
+	fp = fopen(path, "r");
+	if (!fp)
+		return false;
+	while (fgets(line, sizeof(line), fp))
+		if (strncmp(line, "Tgid:", 5) == 0) {
+			leader = (uint32_t)strtoul(line + 5, NULL, 10) == pid;
+			break;
+		}
+	fclose(fp);
+	return leader;
+}
+
+/*
+ * --enable_exit_capture and its own selection.  Refused, not dropped,
+ * outside continuous on-CPU sampling with user stacks, and without an
+ * explicit target: do_group_exit fires for every exiting process on the
+ * machine, and the routine non-zero exits of shell scripts and helpers
+ * would flood the buffer.  A session that silently captures nothing would
+ * look like one that saw no exit.
+ */
+static int cpa_bpf_exit_capture_configure(void *ctx)
+{
+	struct cpa_exit_raw raw = {
+		.comm = get_arg_by_name(ctx, "exit_comm"),
+		.pid = get_arg_by_name(ctx, "exit_pid"),
+		.env_name = get_arg_by_name(ctx, "exit_target_env_name"),
+		.env_values = get_arg_by_name(ctx, "exit_target_env_values"),
+		.env_value_prefix = get_arg_by_name(ctx, "exit_target_env_value_prefix"),
+	};
+	const struct cpa_target_spec *spec = cpa_target_spec();
+	char err[320];
+
+	exit_capture = atoi(get_arg_by_name(ctx, "enable_exit_capture")) != 0;
+	atomic_store(&exit_capture_count, 0);
+	if (cpa_exit_parse(&raw, &exit_spec, err, sizeof(err))) {
+		CLI_ERROR("%s", err);
+		return -1;
+	}
+	if (cpa_exit_has_targets(&exit_spec) && !exit_capture) {
+		CLI_ERROR("--exit_comm/--exit_pid require --enable_exit_capture");
+		return -1;
+	}
+	if (cpa_exit_has_env_cond(&exit_spec) && !exit_capture) {
+		CLI_ERROR("--exit_target_env_* require --enable_exit_capture");
+		return -1;
+	}
+	/* the exit hook compares tgids: a thread id would silently never match */
+	for (int i = 0; i < exit_spec.n_pids; i++)
+		if (!pid_is_process(exit_spec.pids[i])) {
+			CLI_ERROR("--exit_pid: %u is not a running process", exit_spec.pids[i]);
+			return -1;
+		}
+	if (!exit_capture)
+		return 0;
+	if (atoi(get_arg_by_name(ctx, "offcpu")) || atoi(get_arg_by_name(ctx, "oneshot")) ||
+	    !cli_arg_is_null_default(get_arg_by_name(ctx, "probe"))) {
+		CLI_ERROR("--enable_exit_capture only supports continuous bpf oncpu sampling");
+		return -1;
+	}
+	if (kernel_only_fastpath) {
+		CLI_ERROR("--enable_exit_capture needs user stacks; it cannot be combined with --kernel_stack");
+		return -1;
+	}
+	if (!cpa_exit_has_targets(&exit_spec) && !cpa_target_is_dynamic() && !(spec && spec->legacy_pid > 0) &&
+	    !(spec && spec->legacy_thread_comm[0])) {
+		CLI_ERROR("--enable_exit_capture requires an explicit target (--exit_comm, --exit_pid, --pid, --comm, "
+			  "--thread_comm, --exe, --cgroup, --container_pid, --first_match or --new_only); the exit kprobe "
+			  "fires for every exiting process and system-wide capture would flood the buffer");
+		return -1;
+	}
+	return 0;
+}
+
 static enum cpa_worker_init_result cpa_bpf_capture_init_fn(void *ctx, void *worker_ctx)
 {
 	const char *backend = get_arg_by_name(ctx, "backend");
@@ -548,6 +646,8 @@ static enum cpa_worker_init_result cpa_bpf_capture_init_fn(void *ctx, void *work
 	if (cpa_target_configure(ctx))
 		return CPA_INIT_FAILED;
 	bpf_capture_config.pid = cpa_target_is_dynamic() ? 0 : cpa_target_spec()->legacy_pid;
+	if (cpa_bpf_exit_capture_configure(ctx))
+		return CPA_INIT_FAILED;
 
 	bpf_exec_counter = cli_counter_init("bpf_exec_time", CLI_COUNTER_TYPE_TIME_NS);
 	if (!bpf_exec_counter)
@@ -683,4 +783,5 @@ void cpa_bpf_capture_get_stats(struct cpa_capture_stats *stat)
 	memset(stat, 0, sizeof(*stat));
 	bpf_event_poll_get_stats(&poll_stats);
 	stat->lost_events = poll_stats.lost_events;
+	stat->exit_capture_count = atomic_load_explicit(&exit_capture_count, memory_order_relaxed);
 }
