@@ -79,6 +79,13 @@ static __always_inline bool comm_in_rules(const char comm[TARGET_COMM_LEN],
 	return comm_in(comm, rules->comms, rules->n_comms);
 }
 
+/* Exit capture's --exit_comm names (see target_rules::n_exit_comms). */
+static __always_inline bool exit_comm_in_rules(const char comm[TARGET_COMM_LEN],
+					       const struct target_rules *rules)
+{
+	return comm_in(comm, rules->exit_comms, rules->n_exit_comms);
+}
+
 static __always_inline bool cgroup_id_in_rules(__u64 id,
 					       const struct target_rules *rules)
 {
@@ -257,6 +264,9 @@ static __always_inline bool on_exec(void *ctx)
 	task = (struct task_struct *)bpf_get_current_task();
 	target_key_of(task, tgid, &key);
 	bpf_get_current_comm(&comm, sizeof(comm));
+	/* exit capture's names, told whatever the global selection does */
+	if (exit_comm_in_rules(comm, rules))
+		emit_event(ctx, TARGET_EV_EXIT_NAMED, tgid, 0, key.identity, task);
 	if (!rules->enabled || !target_session_open())
 		return false;
 	if (rules->n_exes)
@@ -363,6 +373,20 @@ int BPF_KPROBE(target_fork, struct task_struct *child)
 	child_tgid = BPF_CORE_READ(child, tgid);
 	if (child_pid != child_tgid)
 		return 0;	/* new thread of an existing process */
+
+	/*
+	 * Exit capture's names: the child carries the forking thread's name
+	 * until it execs, which the exit hook matches on its own.
+	 */
+	if (rules->n_exit_comms) {
+		char comm[TARGET_COMM_LEN] = {};
+
+		BPF_CORE_READ_STR_INTO(&comm, child, comm);
+		if (exit_comm_in_rules(comm, rules))
+			emit_event(ctx, TARGET_EV_EXIT_NAMED, child_tgid,
+				   bpf_get_current_pid_tgid() >> 32,
+				   target_identity(child), child);
+	}
 
 	if (!rules->enabled || !target_session_open())
 		return 0;

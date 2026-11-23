@@ -120,13 +120,22 @@ struct target_rules {
 	 * before that exec can no longer be inserted.
 	 */
 	__u8 scanning;
-	__u8 pad[6];
+	/*
+	 * Exit capture's --exit_comm, when --exit_target_env_name wants the
+	 * environment of those processes: an exec into one of these names, or
+	 * a fork by a process of one, is told (TARGET_EV_EXIT_NAMED) so that
+	 * userspace reads the environ while the process lives.  Independent of
+	 * @enabled; nothing is written to a map.
+	 */
+	__u8 n_exit_comms;
+	__u8 pad[5];
 	__u64 window_ns;	/* --startup_window, 0 = none */
 	/* NUL padded so two u64 compares decide an exact comm match. */
 	char comms[TARGET_MAX_COMMS][TARGET_COMM_LEN];
 	__u64 cgroup_ids[TARGET_MAX_CGROUPS];
 	__u64 exe_dev[TARGET_MAX_EXES];	/* kernel dev_t encoding (major << 20 | minor) */
 	__u64 exe_ino[TARGET_MAX_EXES];
+	char exit_comms[TARGET_MAX_COMMS][TARGET_COMM_LEN];
 };
 
 /*
@@ -138,6 +147,7 @@ enum target_event_kind {
 	TARGET_EV_LATCHED = 2,
 	TARGET_EV_FORKED = 3,
 	TARGET_EV_UNTRACKED = 4,
+	TARGET_EV_EXIT_NAMED = 5,	/* see target_rules::n_exit_comms */
 };
 
 struct target_event {

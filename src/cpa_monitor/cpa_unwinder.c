@@ -4,6 +4,7 @@
 #include "cpa_unwinder.h"
 #include "cpa_sample_pool.h"
 #include "cpa_target_ctl.h"
+#include "cpa_exit_env.h"
 #include "cli_stackmap.h"
 #include "cli_stackmap_private.h"
 #include "cpa_capture_mode.h"
@@ -900,6 +901,7 @@ static void cpa_reap_exits(struct unwind_worker *w)
 
 			gu_event_occur(w->ctx, GU_EVENT_PROCESS_EXIT, &exit_event->gu);
 			cpa_target_on_exit(exit_event->gu.pid);
+			cpa_exit_env_on_pid_exit(exit_event->gu.pid, exit_event->gu.start_time);
 			free(exit_event);
 		}
 	} while (n == CPA_PID_EXIT_DRAIN_BATCH);

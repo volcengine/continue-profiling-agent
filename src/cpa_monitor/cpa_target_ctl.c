@@ -48,8 +48,11 @@
 #include "bpf_event_poll.h"
 #include "cli_common.h"
 #include "cpa_unwinder.h"
+#include "cpa_exit_env.h"
 #include "target_ctl.h"
 #include "uthash.h"
+
+static bool exit_env_by_name(void);
 
 #ifndef __NR_pidfd_open
 #define __NR_pidfd_open 434	/* the same number on every architecture */
@@ -101,6 +104,8 @@ struct target_pid {
 static struct {
 	bool dynamic;
 	struct cpa_target_spec spec;
+	/* exit capture's own selection, whose env condition target_ctl serves */
+	struct cpa_exit_spec exit;
 	struct target_rules rules;
 
 	/* the cgroup hierarchy the rules use, see cg_setup() */
@@ -739,6 +744,11 @@ static void target_event_cb(void *data, unsigned int size, void *user_ctx)
 	memcpy(comm, ev->comm, TARGET_COMM_LEN);
 	key = instance_key(ev->tgid, ev->identity);
 
+	if (ev->kind == TARGET_EV_EXIT_NAMED) {
+		cpa_exit_env_selected(ev->tgid, ev->identity);
+		return;
+	}
+
 	if (ev->kind == TARGET_EV_UNTRACKED) {
 		CLI_OUTPUT("target: untrack pid=%u "
 			   "reason=exec-no-longer-matches", ev->tgid);
@@ -1055,10 +1065,19 @@ int cpa_target_prepare(void)
 {
 	struct target_rules *r = &tc.rules;
 
-	if (!tc.dynamic)
+	if (!cpa_target_needs_bpf())
 		return 0;
 
 	memset(r, 0, sizeof(*r));
+	for (int i = 0; exit_env_by_name() && i < tc.exit.n_comms; i++)
+		memcpy(r->exit_comms[i], tc.exit.comms[i], TARGET_COMM_LEN);
+	r->n_exit_comms = exit_env_by_name() ? tc.exit.n_comms : 0;
+	if (!tc.dynamic) {
+		/* only the exec and fork notifications: no target set */
+		tc.owner_fd = target_ctl_pids_fd();
+		tc.latch_fd = target_ctl_latch_fd();
+		return tc.owner_fd < 0 || tc.latch_fd < 0 ? -ENOENT : 0;
+	}
 	tc.n_cg_paths = 0;
 	if (cpa_target_has_rules(&tc.spec) && (tc.spec.n_cgroups || tc.spec.container_pid) &&
 	    cg_setup())
@@ -1184,14 +1203,101 @@ static void reset_state(void)
 	tc.phase = PHASE_RUNNING;
 }
 
+void cpa_target_set_exit(const struct cpa_exit_spec *exit)
+{
+	tc.exit = *exit;
+	cpa_exit_env_configure(exit);
+}
+
+/* --exit_comm with an env condition: exec and fork must be told. */
+static bool exit_env_by_name(void)
+{
+	return cpa_exit_env_enabled() && tc.exit.n_comms;
+}
+
+bool cpa_target_needs_bpf(void)
+{
+	return tc.dynamic || exit_env_by_name();
+}
+
+/*
+ * The env condition's processes that run already: --exit_pid, and those
+ * with an --exit_comm name.  After the hooks are attached, so that a
+ * process is either seen here or by its exec or fork notification.
+ */
+static void exit_env_seed(void)
+{
+	DIR *dir;
+	struct dirent *de;
+
+	if (!cpa_exit_env_enabled())
+		return;
+	for (int i = 0; i < tc.exit.n_pids; i++) {
+		struct proc_info info;
+
+		if (!read_proc_stat(tc.exit.pids[i], &info))
+			cpa_exit_env_read(tc.exit.pids[i], info.identity);
+	}
+	if (!tc.exit.n_comms || !(dir = opendir("/proc")))
+		return;
+	while ((de = readdir(dir)) != NULL) {
+		struct proc_info info;
+		char *end = NULL;
+		unsigned long pid = strtoul(de->d_name, &end, 10);
+
+		if (!end || *end || !pid || read_proc_stat((uint32_t)pid, &info) ||
+		    (info.flags & TARGET_KTHREAD_FLAG))
+			continue;
+		for (int i = 0; i < tc.exit.n_comms; i++)
+			if (strcmp(info.comm, tc.exit.comms[i]) == 0) {
+				cpa_exit_env_read((uint32_t)pid, info.identity);
+				break;
+			}
+	}
+	closedir(dir);
+}
+
+/*
+ * The env reader, and for --exit_comm without a dynamic selection the
+ * exec and fork notifications alone (rules disabled: nothing is selected).
+ */
+static int exit_env_start(void)
+{
+	struct target_ctl_hooks hooks;
+	int ret;
+
+	if (!cpa_exit_env_enabled())
+		return 0;
+	ret = cpa_exit_env_start();
+	if (ret) {
+		CLI_ERROR("exit env: cannot start the reader: %s", strerror(-ret));
+		return ret;
+	}
+	if (tc.dynamic)
+		return 0;
+	if (exit_env_by_name()) {
+		tc.rules.enabled = 0;
+		atomic_store(&tc.accepting, true);
+		atomic_store(&tc.stopping, false);
+		ret = target_ctl_start(&tc.rules, target_event_cb, &hooks);
+		if (!ret)
+			ret = check_hooks(&hooks);
+		if (ret)
+			return ret;
+	}
+	exit_env_seed();
+	return 0;
+}
+
 int cpa_target_start(bool oncpu, bool offcpu)
 {
 	struct target_ctl_hooks hooks;
 	bool scan;
 	int ret;
 
-	if (!tc.dynamic)
-		return 0;
+	ret = exit_env_start();
+	if (ret || !tc.dynamic)
+		return ret;
 
 	reset_state();
 	if ((oncpu && (ret = check_sharing("stack_capture",
@@ -1241,6 +1347,7 @@ int cpa_target_start(bool oncpu, bool offcpu)
 	}
 	if (tc.spec.children && !tc.spec.new_only)
 		scan_children();
+	exit_env_seed();
 	pthread_mutex_lock(&tc.index_lock);
 	if (!HASH_COUNT(tc.index))
 		CLI_OUTPUT("target: waiting for a matching process");
@@ -1265,6 +1372,7 @@ void cpa_target_shutdown(void)
 	/* stop accepting notifications before anything they touch goes away */
 	atomic_store(&tc.accepting, false);
 	atomic_store(&tc.stopping, true);
+	cpa_exit_env_stop();
 	wake_first_match();
 
 	if (tc.thread_started)

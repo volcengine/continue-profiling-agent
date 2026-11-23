@@ -25,6 +25,13 @@ int cpa_target_configure(void *cli_ctx);
 /* True when the selection goes through target_ctl's target set. */
 bool cpa_target_is_dynamic(void);
 
+/* Exit capture's own selection; before cpa_target_prepare(). */
+void cpa_target_set_exit(const struct cpa_exit_spec *exit);
+
+/* True when target_ctl must be loaded: a dynamic selection, or exec and fork
+ * notifications for --exit_comm's env condition. */
+bool cpa_target_needs_bpf(void);
+
 const struct cpa_target_spec *cpa_target_spec(void);
 
 /* Publish the rules and tell the capture modules which map to share. */

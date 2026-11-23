@@ -14,6 +14,7 @@
 #include "cpa_sample_pool.h"
 #include "cpa_stack_sample_builder.h"
 #include "cpa_target_ctl.h"
+#include "cpa_exit_env.h"
 #include "cpa_drop_policy.h"
 #include <stdlib.h>
 #include <errno.h>
@@ -52,6 +53,9 @@ static bool kernel_only_fastpath = false;
 static bool exit_capture;
 static struct cpa_exit_spec exit_spec;
 static atomic_ullong exit_capture_count;
+/* EXIT events dropped by --exit_target_env_*: read and not matching, not read */
+static atomic_ullong exit_env_mismatch_drop_count;
+static atomic_ullong exit_env_unknown_drop_count;
 static pthread_mutex_t kernel_only_fastpath_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t kernel_only_fastpath_idle = PTHREAD_COND_INITIALIZER;
 static unsigned int kernel_only_fastpath_active;
@@ -300,6 +304,23 @@ static void stack_capture_event_process(void *event, unsigned int size, void *us
 		goto out;
 	}
 
+	if (e->type & STACK_EVENT_EXIT_NONZERO) {
+		atomic_fetch_add_explicit(&exit_capture_count, 1, memory_order_relaxed);
+		/* the condition is decided when the process was selected: no verdict, no record */
+		if (cpa_exit_env_enabled()) {
+			switch (cpa_exit_env_verdict(e->pid, e->unique_id)) {
+			case CPA_EXIT_ENV_MATCH:
+				break;
+			case CPA_EXIT_ENV_MISMATCH:
+				atomic_fetch_add_explicit(&exit_env_mismatch_drop_count, 1, memory_order_relaxed);
+				goto out;
+			case CPA_EXIT_ENV_UNKNOWN:
+				atomic_fetch_add_explicit(&exit_env_unknown_drop_count, 1, memory_order_relaxed);
+				goto out;
+			}
+		}
+	}
+
 	enum drop_sample_result drop_state = should_drop_sample();
 
 	const struct cpa_stack_sample_build_config build_config = {
@@ -320,8 +341,6 @@ static void stack_capture_event_process(void *event, unsigned int size, void *us
 		CLI_ERROR("out of memory building a stack sample");
 		goto out;
 	}
-	if (e->type & STACK_EVENT_EXIT_NONZERO)
-		atomic_fetch_add_explicit(&exit_capture_count, 1, memory_order_relaxed);
 
 	ret = cpa_add_stack_event(sample);
 
@@ -572,6 +591,8 @@ static int cpa_bpf_exit_capture_configure(void *ctx)
 
 	exit_capture = atoi(get_arg_by_name(ctx, "enable_exit_capture")) != 0;
 	atomic_store(&exit_capture_count, 0);
+	atomic_store(&exit_env_mismatch_drop_count, 0);
+	atomic_store(&exit_env_unknown_drop_count, 0);
 	if (cpa_exit_parse(&raw, &exit_spec, err, sizeof(err))) {
 		CLI_ERROR("%s", err);
 		return -1;
@@ -590,6 +611,7 @@ static int cpa_bpf_exit_capture_configure(void *ctx)
 			CLI_ERROR("--exit_pid: %u is not a running process", exit_spec.pids[i]);
 			return -1;
 		}
+	cpa_target_set_exit(&exit_spec);
 	if (!exit_capture)
 		return 0;
 	if (atoi(get_arg_by_name(ctx, "offcpu")) || atoi(get_arg_by_name(ctx, "oneshot")) ||
@@ -674,7 +696,7 @@ static enum cpa_worker_init_result cpa_bpf_capture_init_fn(void *ctx, void *work
 	}
 
 	/* the owner of the target set loads first: capture objects adopt its map */
-	if (cpa_target_is_dynamic()) {
+	if (cpa_target_needs_bpf()) {
 		if (INIT_MODULE_BPF(target_ctl)) {
 			cpa_bpf_capture_disable_modules();
 			cpa_bpf_exec_counter_destroy();
@@ -784,4 +806,6 @@ void cpa_bpf_capture_get_stats(struct cpa_capture_stats *stat)
 	bpf_event_poll_get_stats(&poll_stats);
 	stat->lost_events = poll_stats.lost_events;
 	stat->exit_capture_count = atomic_load_explicit(&exit_capture_count, memory_order_relaxed);
+	stat->exit_env_mismatch_drop_count = atomic_load_explicit(&exit_env_mismatch_drop_count, memory_order_relaxed);
+	stat->exit_env_unknown_drop_count = atomic_load_explicit(&exit_env_unknown_drop_count, memory_order_relaxed);
 }
