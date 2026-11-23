@@ -74,7 +74,21 @@ The default suite currently includes:
     passes with 0 sanitizer reports. `MIDNIGHT_IN=S` (libfaketime, ASan
     builds only: libfaketime breaks TSan's clock) crosses midnight after S
     seconds, so every worker is paused and restored once
-- `tests/cpa/test_target_parse.py`
+- `tests/cpa/test_exit_target_parse.py`, `tests/cpa/test_exit_env.py`
+  - `--exit_comm` / `--exit_pid` / `--exit_target_env_*` parsing and refusals;
+    the env store against real child processes (exact and prefix matches, the
+    first listed name set, none set, gone, per instance, the reader thread),
+    plain, with ASan/UBSan and with TSan
+- `tests/cpa/test_exit_capture_e2e.py` (`tests/cpa/exit_capture/`)
+  - with 1 and 4 unwind workers, copies of `exit_app` take one exit path each:
+    exit_group from a worker, leader pthread_exit then a worker's exit or a
+    SIGKILL, SIGTERM, racing exit_group (one sample), SIGSEGV, exit 0 and a raw
+    SYS_exit (none), exec (none), coredump beside exit capture (COREDUMP only),
+    `--exit_comm` / `--exit_pid` / `--exit_target_env_*` (start scan, exec,
+    fork, mismatches, unknowns, the 4.14 exec fallback); every refused
+    combination; `cpa show --list_exit`. The monitor's Exit Capture Count must
+    equal the records
+
   - compiles a unit test of `src/cpa_monitor/cpa_target.c`: which option
     combinations select through the target set, which keep the pid/thread
     filter, and which are refused

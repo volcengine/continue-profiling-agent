@@ -124,6 +124,71 @@ The selection is kept in a BPF map: rules are checked once where a process is
 born (exec, fork) and sampling only looks the process up, so a selection costs
 nothing per sample beyond that lookup.
 
+## Crash and Non-Zero Exit Stacks
+
+`--enable_coredump_capture` records the stack of a process that dumps core,
+at the dump. `--enable_exit_capture` records one stack per selected process
+that ends non-zero through `exit_group(2)` or a fatal signal, before its
+memory is released:
+
+```text
+<# EXIT NONZERO raw=768 exit=3 #>          exit(3); raw is the wait(2) status
+<# EXIT NONZERO raw=15 sig=15 core=0 #>    killed by SIGTERM
+```
+
+Both are BPF on-CPU only: with `--offcpu`, `--oneshot`, `--probe` or
+`--kernel_stack` (exit capture) they are refused at start. Their frames carry
+symbol+offset, pc, build-id and the full path, for offline resolution.
+
+Exit capture needs a target, since every process on the host passes the exit
+hook: its own
+
+- `--exit_comm <n1,n2>`: processes with these names (at most 8), or
+- `--exit_pid <p1,p2>`: these running processes (at most 16), not both;
+
+these choose exits only and leave sampling as it is. Without them the process
+selection (`--pid`, `--comm`, ...) applies; system-wide exit capture is
+refused.
+
+`--exit_target_env_name MY_POD_NAME,POD_NAME` with
+`--exit_target_env_values <v,...>` (exact) and/or
+`--exit_target_env_value_prefix <p,...>` keeps only the exits of processes
+whose first listed variable set to a non-empty value matched. It needs
+`--exit_comm` or `--exit_pid`. The environment is read when the process is
+selected (its exec or fork into an `--exit_comm` name, the start scan, or start
+for `--exit_pid`), because it is gone at the exit; a process that exits before
+it was read is dropped. The stats line shows `Exit Capture Count`, `Exit Env
+Mismatch Drop` and `Exit Env Unknown Drop`.
+
+Limits, by choice:
+
+- a leader leaving by a raw `exit(2)` syscall with no group exit is not
+  recorded (it would need a hook on every thread exit);
+- an exit record may lack its user frames when the process' view of its
+  mappings is missing the library it exits from: it was never sampled, or it
+  was selected at exec and its view was read while its loader still ran
+  (more likely with several `--unwind_workers`, which unwind that first
+  sample sooner). A process' mappings are re-read at most once per 30-90 s,
+  and the record is unwound after the process is gone, so nothing can be
+  read then;
+- when threads race `exit_group` with different codes, the first entrant's
+  code is recorded.
+
+To read them:
+
+```bash
+./build/bin/cpa show --read /var/log/cpa/cpa_YYMMDD --list_exit \
+  --starttime 00:00:00 --endtime 23:59:59 --core_verbose
+```
+
+`--list_core` lists coredump samples, `--list_exit` exit samples (not both),
+one block each with metadata, exit code and frames; the `--target_*` filters
+apply. `--core_verbose` resolves native frames with addr2line (`CPA_ADDR2LINE`
+overrides the tool), through the binary or a build-id debug file under
+`/usr/lib/debug` or `--core_debug_dir`; `--core_container_pid <pid>` resolves
+container paths through `/proc/<pid>/root`. In the TUI, `L` opens the same
+list.
+
 ## `cpa show`
 
 `cpa show` reads a stored profile directory.

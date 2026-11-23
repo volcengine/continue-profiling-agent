@@ -3,6 +3,7 @@
 
 """Unit tests for process-selection argument parsing (cpa_target.c)."""
 
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -199,6 +200,8 @@ int main(void)
 
 
 def test_cpa_target_parse_rules() -> None:
+    if shutil.which("gcc") is None:
+        pytest.skip("needs gcc")
     with tempfile.TemporaryDirectory(prefix="cpa_target_parse_") as td:
         c_path = Path(td) / "harness.c"
         out_bin = Path(td) / "harness"

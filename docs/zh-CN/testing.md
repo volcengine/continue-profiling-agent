@@ -68,7 +68,11 @@ pytest -q tests/cpa
     报告数为 0 才算通过。`MIDNIGHT_IN=S`（需要 libfaketime，只能用于 ASan 构建：
     libfaketime 会破坏 TSan 的时钟拦截）让时钟在 S 秒后跨过零点，所有回溯线程
     暂停并恢复一次
-- `tests/cpa/test_target_parse.py`
+- `tests/cpa/test_exit_target_parse.py`、`tests/cpa/test_exit_env.py`
+  - `--exit_comm` / `--exit_pid` / `--exit_target_env_*` 的解析与报错；env 存储读真实子进程（精确与前缀匹配、取第一个设了值的名字、都没设、进程已退出、按实例、读线程），普通、ASan/UBSan、TSan 各跑一遍
+- `tests/cpa/test_exit_capture_e2e.py`（`tests/cpa/exit_capture/`）
+  - 1 个和 4 个回溯线程下，`exit_app` 的副本各走一条退出路径：工作线程 exit_group、leader pthread_exit 后工作线程退出或被 SIGKILL、SIGTERM、并发 exit_group（只记一条）、SIGSEGV、exit 0 和裸 SYS_exit（不记）、exec（不记）、与 coredump 同开（只有 COREDUMP）、`--exit_comm` / `--exit_pid` / `--exit_target_env_*`（启动扫描、exec、fork、不满足、读不到、4.14 exec 回退）；所有该拒绝的组合；`cpa show --list_exit`。monitor 的 Exit Capture Count 必须与记录数相等
+
   - 编译 `src/cpa_monitor/cpa_target.c` 的单元测试：哪些选项组合走目标集合，
     哪些保留 pid/线程名过滤，哪些被拒绝
 - `tests/cpa/test_target_select_e2e.py`

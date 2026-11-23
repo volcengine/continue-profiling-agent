@@ -291,6 +291,8 @@ Shared generic options:
 - `--max_store_size_mb <MB>`: restart monitor and trim old stores when store usage exceeds this limit.
 - `--log_print_cycles <N>`: print local runtime statistics every N timer cycles.
 - `--bench`: print per-stat-interval final-DWARF-path benchmark statistics, including measured sample count, actual unwind rate, average/min/max latency, and fixed latency buckets. `FP_BETTER` samples are excluded. Cold symbol/CFI loading can appear in the first few intervals.
+- `--enable_coredump_capture`: record the stack of a process that dumps core. BPF on-CPU only.
+- `--enable_exit_capture`: record one stack per selected process that ends non-zero; needs `--exit_comm`, `--exit_pid` or a process selection; `--exit_target_env_*` keep only processes whose environment matched. See docs/en/usage.md.
 - `--debug_option <PID,FREQ,PATH>`: debug capture override in `{pid},{sample_freq},{dump_path}` form.
 
 `cpa show` options:

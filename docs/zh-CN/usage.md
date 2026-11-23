@@ -110,6 +110,42 @@ sudo ./build/bin/cpa monitor --container_pid 4242
 选择结果存在一个 BPF map 里：规则只在进程诞生（exec、fork）时判断一次，采样时
 只查一次这个 map，所以选择本身对每个样本只多一次查找。
 
+## 崩溃与非零退出时的调用栈
+
+`--enable_coredump_capture` 在进程 core dump 时记录它的调用栈。
+`--enable_exit_capture` 为每个被选中、经 `exit_group(2)` 或致命信号以非零状态结束的进程记录一条调用栈，在内存释放之前：
+
+```text
+<# EXIT NONZERO raw=768 exit=3 #>          exit(3)；raw 是 wait(2) 状态字
+<# EXIT NONZERO raw=15 sig=15 core=0 #>    被 SIGTERM 杀死
+```
+
+两者都只用于 BPF on-CPU 采样：与 `--offcpu`、`--oneshot`、`--probe` 或 `--kernel_stack`（exit 采集）同时使用时启动即报错。帧带符号+偏移、pc、build-id 和完整路径，便于离线解析。
+
+全机每个进程退出都会经过 exit 的 hook，所以 exit 采集必须有目标：它自己的
+
+- `--exit_comm <n1,n2>`：这些进程名（最多 8 个），或
+- `--exit_pid <p1,p2>`：这些正在运行的进程（最多 16 个），二者不能同时用；
+
+它们只决定记录哪些退出，不影响采样范围。不给时沿用进程选择（`--pid`、`--comm` 等）；不支持全机范围的 exit 采集。
+
+`--exit_target_env_name MY_POD_NAME,POD_NAME` 配合 `--exit_target_env_values <v,...>`（完全相等）和/或 `--exit_target_env_value_prefix <p,...>`（前缀），只保留按列出顺序第一个设了非空值的变量满足条件的进程的退出，必须配 `--exit_comm` 或 `--exit_pid`。环境变量在进程被选中时读取（exec 或 fork 成 `--exit_comm` 的名字时、启动扫描时、`--exit_pid` 在启动时），因为退出时已经读不到；还没读到就退出的进程直接丢弃。统计日志里有 `Exit Capture Count`、`Exit Env Mismatch Drop` 和 `Exit Env Unknown Drop`。
+
+有意不做的事：
+
+- leader 用裸 `exit(2)` 系统调用退出、且没有组退出时不记录（需要挂在每个线程退出路径上）；
+- 进程的映射视图里没有它退出时所在的库时，退出记录的用户态帧可能缺失：它从未被采样过，或在 exec 时被选中、视图是在动态链接器还在运行时读的（`--unwind_workers` 大于 1 时更常见，第一个样本被回溯得更早）。一个进程的映射 30–90 秒内最多重读一次，而退出记录被回溯时进程已经不在，读不到了；
+- 多个线程同时用不同的码调用 `exit_group` 时，记录的是先进入者的码。
+
+查看：
+
+```bash
+./build/bin/cpa show --read /var/log/cpa/cpa_YYMMDD --list_exit \
+  --starttime 00:00:00 --endtime 23:59:59 --core_verbose
+```
+
+`--list_core` 列出 coredump 样本，`--list_exit` 列出 exit 样本（不能同用），每条一块：元数据、退出码和帧；`--target_*` 过滤同样适用。`--core_verbose` 用 addr2line 把原生帧解析到源码行（`CPA_ADDR2LINE` 可指定工具），先查二进制本身，再按 build-id 查 `/usr/lib/debug` 或 `--core_debug_dir` 下的调试文件；`--core_container_pid <pid>` 通过 `/proc/<pid>/root` 解析容器路径。TUI 里按 `L` 打开同一个列表。
+
 ## `cpa show`
 
 `cpa show` 用于读取 `cpa monitor` 生成的 profile 目录。
