@@ -137,8 +137,14 @@ void cpa_timer_fn(void *worker_ctx)
 	cpa_perf_capture_get_stats(&perf_capture_stat);
 
 	// map, always have
+	/* a copy: the counters change under the lock while samples are committed */
 	struct cli_stackmap *map = cpa_main_tracemap_get_and_lock();
-	struct cli_stackmap_memory_usage *usage = cli_stackmap_get_memory_usage(map);
+	struct cli_stackmap_memory_usage *map_counters = cli_stackmap_get_memory_usage(map);
+	struct cli_stackmap_memory_usage map_usage = { 0 };
+	struct cli_stackmap_memory_usage *usage = &map_usage;
+
+	if (map_counters)
+		map_usage = *map_counters;
 	cpa_main_tracemap_unlock();
 
 	struct dir_info *dir_info = cpa_get_stackmap_save_dir();
