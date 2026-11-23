@@ -70,6 +70,28 @@ def test_cpa_monitor_bench_reports_dwarf_unwind_stats(tmp_path):
     assert "Bench DWARF Histogram:" in full_output
 
 
+@pytest.mark.parametrize(
+    "extra_args,message",
+    [
+        (["--datapath=bogus"], "Invalid datapath=bogus"),
+        (["--ring_size_mb=0"], "Invalid ring_size_mb=0"),
+        (["--bpf_exec_time_guard_ms=x"], "Invalid bpf_exec_time_guard_ms=x"),
+        (["--offcpu", "--datapath=bogus"], "Invalid datapath=bogus"),
+    ],
+)
+def test_cpa_monitor_bpf_capture_init_failure_fails_the_run(tmp_path, extra_args, message):
+    """A failure inside the BPF capture worker's init must stop the run with a
+    non-zero exit, not leave a monitor running without a capture."""
+    stdout, stderr, return_code = run_command(
+        ["monitor", "--backend=bpf", "--duration=2", "--store_dir", str(tmp_path), *extra_args]
+    )
+
+    full_output = f"{stdout}{stderr}"
+    assert message in full_output
+    assert return_code != 0, full_output
+    assert "Failed to init worker bpf_capture_worker" in full_output
+
+
 def test_cpa_monitor_rejects_perf_backend_with_offcpu(tmp_path):
     stdout, stderr, return_code = run_command(
         [

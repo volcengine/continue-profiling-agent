@@ -47,11 +47,11 @@ def test_bpf_capture_rolls_back_failed_setup_paths() -> None:
     assert "process_exit_enabled = true" in process_exit_setup
     assert "cpa_bpf_capture_disable_modules();" in init_body
 
-    offcpu_body = _function_body(source, "static int cpa_bpf_offcpu_capture_init")
+    offcpu_body = _function_body(source, "static enum cpa_worker_init_result cpa_bpf_offcpu_capture_init")
     assert "DISABLE_MODULE_BPF(offcpu_capture)" in offcpu_body
     assert "offcpu_capture_enabled = true" in offcpu_body
 
-    oncpu_body = _function_body(source, "static int cpa_bpf_oncpu_capture_init")
+    oncpu_body = _function_body(source, "static enum cpa_worker_init_result cpa_bpf_oncpu_capture_init")
     assert "if (!probe)" in oncpu_body
     assert "DISABLE_MODULE_BPF(stack_capture)" in oncpu_body
     assert "stack_capture_enabled = true" in oncpu_body

@@ -351,7 +351,7 @@ out:
 /**
  * Configure off-CPU capture backend and attach finish_task_switch listener.
  */
-static int cpa_bpf_offcpu_capture_init(void *ctx)
+static enum cpa_worker_init_result cpa_bpf_offcpu_capture_init(void *ctx)
 {
 	if (set_offcpu_capture_size(bpf_capture_config.stack_size) < 0) {
 		CLI_ERROR("Failed to set offcpu capture size %u", bpf_capture_config.stack_size);
@@ -390,15 +390,12 @@ static int cpa_bpf_offcpu_capture_init(void *ctx)
 /**
  * Configure on-CPU capture backend (kernel or userspace stack sampling).
  */
-static int cpa_bpf_oncpu_capture_init(void *ctx)
+/*
+ * --datapath and --ring_size_mb, checked whatever the mode, so a bad value is
+ * refused even where it would not be used.
+ */
+static enum cpa_worker_init_result cpa_bpf_capture_parse_datapath(void *ctx)
 {
-	if (set_stack_capture_size(bpf_capture_config.stack_size) < 0) {
-		CLI_ERROR("Failed to set stack capture size %u", bpf_capture_config.stack_size);
-		return CPA_INIT_FAILED;
-	}
-
-	bool coredump_enabled = atoi(get_arg_by_name(ctx, "enable_coredump_capture")) != 0;
-	stack_capture_set_coredump_capture(coredump_enabled);
 	const char *datapath = get_arg_by_name(ctx, "datapath");
 	int datapath_mode = 0;
 	if (datapath && !cli_arg_is_null_default(datapath)) {
@@ -428,6 +425,19 @@ static int cpa_bpf_oncpu_capture_init(void *ctx)
 		ring_mb = (unsigned int)ring_val;
 	}
 	stack_capture_set_datapath(datapath_mode, ring_mb);
+
+	return CPA_INIT_SUCCESS;
+}
+
+static enum cpa_worker_init_result cpa_bpf_oncpu_capture_init(void *ctx)
+{
+	if (set_stack_capture_size(bpf_capture_config.stack_size) < 0) {
+		CLI_ERROR("Failed to set stack capture size %u", bpf_capture_config.stack_size);
+		return CPA_INIT_FAILED;
+	}
+
+	bool coredump_enabled = atoi(get_arg_by_name(ctx, "enable_coredump_capture")) != 0;
+	stack_capture_set_coredump_capture(coredump_enabled);
 
 	if (INIT_MODULE_BPF(stack_capture))
 		return CPA_INIT_FAILED;
@@ -543,15 +553,21 @@ static enum cpa_worker_init_result cpa_bpf_capture_init_fn(void *ctx, void *work
 		process_exit_enabled = true;
 	}
 
+	if (cpa_bpf_capture_parse_datapath(ctx) != CPA_INIT_SUCCESS) {
+		cpa_bpf_capture_disable_modules();
+		cpa_bpf_exec_counter_destroy();
+		return CPA_INIT_FAILED;
+	}
+
 	int offcpu = atoi(get_arg_by_name(ctx, "offcpu"));
 	if (offcpu) {
-		if (cpa_bpf_offcpu_capture_init(ctx) < 0) {
+		if (cpa_bpf_offcpu_capture_init(ctx) != CPA_INIT_SUCCESS) {
 			cpa_bpf_capture_disable_modules();
 			cpa_bpf_exec_counter_destroy();
 			return CPA_INIT_FAILED;
 		}
 	} else {
-		if (cpa_bpf_oncpu_capture_init(ctx) < 0) {
+		if (cpa_bpf_oncpu_capture_init(ctx) != CPA_INIT_SUCCESS) {
 			cpa_bpf_capture_disable_modules();
 			cpa_bpf_exec_counter_destroy();
 			return CPA_INIT_FAILED;
