@@ -27,8 +27,8 @@ sudo ./build/bin/cpa monitor \
 Useful options:
 
 - `--backend bpf|perf`: choose the sampling backend
-- `--pid <pid>`: limit capture to one process
-- `--comm <name>`: limit capture by command name
+- `--pid`, `--comm` and the other selection options: see
+  [Choosing What to Profile](#choosing-what-to-profile)
 - `--record_interval <sec>`: control the storage/query granularity
 - `--persistent_day <days>`: retain only recent profile directories
 - `--record_env_name <k1,k2>`: persist selected environment keys for later
@@ -72,6 +72,53 @@ sudo ./build/bin/cpa monitor \
   --backend perf \
   --store_dir /var/log/cpa
 ```
+
+
+## Choosing What to Profile
+
+By default every process is sampled. These options narrow it down (BPF
+backend only). Different options are combined with AND, comma-separated
+values inside one option with OR; contradictory combinations are refused
+when the command line is read.
+
+- `--pid <p1,p2,...>`: these processes (at most 16)
+- `--comm <n1,n2,...>`: processes with one of these names (at most 8). The
+  name is checked when a process starts or execs, so a shell that execs into
+  the name is picked up and a process that execs into something else is
+  dropped. Names are exact and at most 15 bytes, as the kernel keeps them.
+- `--thread_comm <name>`: threads with this name, alone or with a single
+  `--pid` (the filter `--comm` used to be)
+- `--exe <path1,...>`: processes running one of these executables, compared
+  by device and inode (at most 4)
+- `--cgroup <path1,...>`: processes in one of these cgroups, given relative
+  to the cgroup v1 `cpu` mount or the cgroup v2 mount (at most 8);
+  `--cgroup_recursive` adds their descendants, up to 8 levels. Needs a kernel
+  whose cgroupfs gives cgroup ids to user space (upstream 4.15 and later; some
+  vendor kernels earlier); refused otherwise.
+- `--container_pid <pid>`: the processes in that process' cgroup and below it
+- `--children`: also the processes the selected ones start, and theirs
+- `--new_only`: only processes that start after the monitor
+- `--first_match`: the first process that starts and matches, nothing else;
+  the run stops once it exits or its startup window ends
+- `--startup_window <sec>`: sample each selected process for this long after
+  it is selected
+
+Examples:
+
+```bash
+# every java process, including ones started later
+sudo ./build/bin/cpa monitor --comm java
+
+# the next process started from this binary, for its first 60 seconds
+sudo ./build/bin/cpa monitor --exe /opt/app/bin/server --first_match --startup_window 60
+
+# a container's processes
+sudo ./build/bin/cpa monitor --container_pid 4242
+```
+
+The selection is kept in a BPF map: rules are checked once where a process is
+born (exec, fork) and sampling only looks the process up, so a selection costs
+nothing per sample beyond that lookup.
 
 ## `cpa show`
 

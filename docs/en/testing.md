@@ -44,6 +44,14 @@ The default suite currently includes:
 - `tests/cpa/test_offcpu_probe.py`
   - `offcpu` and `probe` in normal and one-shot modes
   - OFFCPU thread/process metadata contract
+- `tests/cpa/test_target_parse.py`
+  - compiles a unit test of `src/cpa_monitor/cpa_target.c`: which option
+    combinations select through the target set, which keep the pid/thread
+    filter, and which are refused
+- `tests/cpa/test_target_select_e2e.py`
+  - `--comm`, a `--pid` list, `--exe`, `--new_only`, `--children`,
+    `--first_match` (the run ends by itself) and `--startup_window` sample
+    exactly the processes they name; bad combinations are refused
 - `tests/cpa/test_stack_sample_builder.py`
   - compiles `tests/cpa/test_stack_sample_builder.c`, plain and with
     AddressSanitizer/UndefinedBehaviorSanitizer; no root needed

@@ -42,6 +42,13 @@ pytest -q tests/cpa
 - `tests/cpa/test_offcpu_probe.py`
   - `offcpu` 与 `probe` 的 normal / oneshot 行为
   - `offcpu` 的线程/进程元数据约定
+- `tests/cpa/test_target_parse.py`
+  - 编译 `src/cpa_monitor/cpa_target.c` 的单元测试：哪些选项组合走目标集合，
+    哪些保留 pid/线程名过滤，哪些被拒绝
+- `tests/cpa/test_target_select_e2e.py`
+  - `--comm`、`--pid` 列表、`--exe`、`--new_only`、`--children`、
+    `--first_match`（运行自动结束）和 `--startup_window` 只采集它们指定的进程；
+    错误组合被拒绝
 - `tests/cpa/test_stack_sample_builder.py`
   - 编译 `tests/cpa/test_stack_sample_builder.c`，普通构建和
     AddressSanitizer/UndefinedBehaviorSanitizer 构建各跑一次；不需要 root

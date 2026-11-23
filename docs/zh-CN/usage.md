@@ -27,8 +27,7 @@ sudo ./build/bin/cpa monitor \
 常用参数：
 
 - `--backend bpf|perf`：选择采样后端
-- `--pid <pid>`：限制到某个进程
-- `--comm <name>`：按进程名过滤
+- `--pid`、`--comm` 等进程选择选项：见下面「选择采集哪些进程」
 - `--record_interval <sec>`：控制存储和查询粒度
 - `--persistent_day <days>`：仅保留最近若干天的目录
 - `--record_env_name <k1,k2>`：记录指定环境变量键，供 `cpa show` 后续过滤
@@ -67,6 +66,46 @@ sudo ./build/bin/cpa monitor \
   --backend perf \
   --store_dir /var/log/cpa
 ```
+
+
+## 选择采集哪些进程
+
+默认采集所有进程。下面的选项用来缩小范围（仅 BPF 后端）。不同选项之间是"且"，
+同一选项里逗号分隔的值之间是"或"；互相矛盾的组合在解析命令行时就会被拒绝。
+
+- `--pid <p1,p2,...>`：这些进程（最多 16 个）
+- `--comm <n1,n2,...>`：进程名是其中之一的进程（最多 8 个）。进程名在进程启动或
+  exec 时判断，所以 exec 成这个名字的 shell 会被选中，exec 成别的程序的进程会被
+  移出。名字精确匹配，最多 15 字节（内核只保留这么长）。
+- `--thread_comm <name>`：线程名是它的线程，单独用或配一个 `--pid`（即原来
+  `--comm` 的语义）
+- `--exe <path1,...>`：运行这些可执行文件之一的进程，按设备号和 inode 比较
+  （最多 4 个）
+- `--cgroup <path1,...>`：在这些 cgroup 之一中的进程，路径相对 cgroup v1 的
+  `cpu` 挂载点或 cgroup v2 挂载点（最多 8 个）；加 `--cgroup_recursive` 包含下层
+  cgroup（最多 8 层）。需要内核的 cgroupfs 向用户态提供 cgroup id（upstream 4.15 及以上，部分发行版内核更早就有）；否则直接报错。
+- `--container_pid <pid>`：这个进程所在 cgroup 及其下层的所有进程
+- `--children`：同时采集被选进程启动的子进程，以及子进程的子进程
+- `--new_only`：只选 monitor 启动之后才启动的进程
+- `--first_match`：只选第一个启动并匹配的进程；它退出或采集时间窗结束后，本次
+  运行自动结束
+- `--startup_window <sec>`：每个被选中的进程只采集被选中后的这么多秒
+
+示例：
+
+```bash
+# 所有 java 进程，包括之后启动的
+sudo ./build/bin/cpa monitor --comm java
+
+# 下一个由这个程序启动的进程，只采前 60 秒
+sudo ./build/bin/cpa monitor --exe /opt/app/bin/server --first_match --startup_window 60
+
+# 某个容器的所有进程
+sudo ./build/bin/cpa monitor --container_pid 4242
+```
+
+选择结果存在一个 BPF map 里：规则只在进程诞生（exec、fork）时判断一次，采样时
+只查一次这个 map，所以选择本身对每个样本只多一次查找。
 
 ## `cpa show`
 
