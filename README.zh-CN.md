@@ -267,6 +267,7 @@ taskset -c 0 libs/libgunwinder/bin/cfi_bench \
 - `--parse_env_values, -V <LIST>`：只对环境变量值匹配该列表的进程做用户态展开。
 - `--enable_coredump_capture`：进程 core dump 时记录它的调用栈，只用于 BPF on-CPU。
 - `--enable_exit_capture`：为每个被选中、以非零状态结束的进程记录一条调用栈；需要 `--exit_comm`、`--exit_pid` 或进程选择；`--exit_target_env_*` 只保留环境变量满足条件的进程。见 docs/zh-CN/usage.md。
+- `--pagefault`：按分配调用栈采集一个进程的常驻匿名内存（单位字节，每秒一个存活集合；`--pid` 或规则加 `--first_match`）；`--pf_sample_pages <N>` 页 N 取 1（默认 16）。Linux 5.4 - 5.18 及 6.3+。见 docs/zh-CN/usage.md。
 - `--max_queue_size, -m <N>`：内存中 stack event 队列的上限。
 - `--unwind_workers <N>`：回溯用户栈的线程数，1 到在线 CPU 数（最多 64），默认 1。每个进程只由其中一个线程回溯；内存随 N 增长（见 docs/zh-CN/architecture.md）。
 - `--stack_size <BYTES>`：BPF 后端用户态栈抓取缓冲大小，必须 4K 对齐，范围 `[4096, 65536]`。perf 后端不支持自定义这一语义。

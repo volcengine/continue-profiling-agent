@@ -63,6 +63,9 @@ lite 版本：
 ring buffer 数据通路。已在 4.14.81（x86_64）上验证 on-CPU、off-CPU 和
 只采内核栈三种模式。
 
+`--pagefault` 在 5.4 以前不可用：那里 perf 输出到满的缓冲区时失败不会告诉
+BPF 程序，采样页的计数无法精确。这些内核上它会拒绝启动并说明原因。
+
 对于发行版内核，不要只看 `uname -r`。vendor 经常在不改变 upstream
 major/minor 版本的情况下回合 BPF 和 mm 修复。启用 CPA 前，请检查 vendor 内核
 changelog，确认 upstream fix commit 已包含。

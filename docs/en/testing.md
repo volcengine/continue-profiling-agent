@@ -88,6 +88,21 @@ The default suite currently includes:
     fork, mismatches, unknowns, the 4.14 exec fallback); every refused
     combination; `cpa show --list_exit`. The monitor's Exit Capture Count must
     equal the records
+- `tests/cpa/test_pagefault.py`
+  - compiles the live-set tracker harness (`tests/cpa/pagefault/tracker_harness.c`:
+    allocations, releases, moves, resets, replay of late allocations, THP
+    splits, the sampling hash) and pins the `--pagefault` contracts: one entry
+    chosen in one place, every release hook required, before 5.4 refused with
+    the e2e's message, input taken before the target session opens
+- `tests/cpa/test_pagefault_e2e.py` (`tests/cpa/pagefault/`)
+  - one test per case of `run_pagefault_e2e.py` against `pf_app`: the live set
+    of single seconds through every allocation and release path (1 in 16 and
+    exact), the baseline, exec, a cold start by `--cgroup --comm
+    --first_match`, the leader exiting first, failed and odd syscalls, zero
+    pages, THP, fork copy on write, partial THP release, multi-size THP (6.8+)
+    and `MREMAP_DONTUNMAP`; every refused setup. A case skips only saying why
+    (no THP, no multi-size THP). Before 5.4 every case checks the refusal.
+    `--unwind_workers N` runs it with N unwind workers
 
   - compiles a unit test of `src/cpa_monitor/cpa_target.c`: which option
     combinations select through the target set, which keep the pid/thread

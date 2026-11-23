@@ -72,6 +72,10 @@ pytest -q tests/cpa
   - `--exit_comm` / `--exit_pid` / `--exit_target_env_*` 的解析与报错；env 存储读真实子进程（精确与前缀匹配、取第一个设了值的名字、都没设、进程已退出、按实例、读线程），普通、ASan/UBSan、TSan 各跑一遍
 - `tests/cpa/test_exit_capture_e2e.py`（`tests/cpa/exit_capture/`）
   - 1 个和 4 个回溯线程下，`exit_app` 的副本各走一条退出路径：工作线程 exit_group、leader pthread_exit 后工作线程退出或被 SIGKILL、SIGTERM、并发 exit_group（只记一条）、SIGSEGV、exit 0 和裸 SYS_exit（不记）、exec（不记）、与 coredump 同开（只有 COREDUMP）、`--exit_comm` / `--exit_pid` / `--exit_target_env_*`（启动扫描、exec、fork、不满足、读不到、4.14 exec 回退）；所有该拒绝的组合；`cpa show --list_exit`。monitor 的 Exit Capture Count 必须与记录数相等
+- `tests/cpa/test_pagefault.py`
+  - 编译存活集合 tracker 的单元测试（`tests/cpa/pagefault/tracker_harness.c`：分配、释放、移动、重置、迟到分配的重放、THP 拆分、采样哈希），并固定 `--pagefault` 的约定：入口只在一处选定、每个释放 hook 都必须挂上、5.4 以前以 e2e 期望的消息拒绝、在目标会话打开之前就开始接收输入
+- `tests/cpa/test_pagefault_e2e.py`（`tests/cpa/pagefault/`）
+  - `run_pagefault_e2e.py` 的每个用例一个测试，目标是 `pf_app`：经过每条分配和释放路径后单独一秒的存活集合（16 取 1 与精确）、启动前常驻、exec、用 `--cgroup --comm --first_match` 冷启动、主线程先退出、失败和特殊的系统调用、零页、THP、fork 写时复制、THP 部分释放、多尺寸 THP（6.8+）、`MREMAP_DONTUNMAP`；所有该拒绝的配置。只有说明原因时才跳过（没有 THP、没有多尺寸 THP）。5.4 以前每个用例都检查拒绝启动。`--unwind_workers N` 用 N 个回溯线程运行
 
   - 编译 `src/cpa_monitor/cpa_target.c` 的单元测试：哪些选项组合走目标集合，
     哪些保留 pid/线程名过滤，哪些被拒绝

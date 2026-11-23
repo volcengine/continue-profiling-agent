@@ -146,6 +146,90 @@ sudo ./build/bin/cpa monitor --container_pid 4242
 
 `--list_core` 列出 coredump 样本，`--list_exit` 列出 exit 样本（不能同用），每条一块：元数据、退出码和帧；`--target_*` 过滤同样适用。`--core_verbose` 用 addr2line 把原生帧解析到源码行（`CPA_ADDR2LINE` 可指定工具），先查二进制本身，再按 build-id 查 `/usr/lib/debug` 或 `--core_debug_dir` 下的调试文件；`--core_container_pid <pid>` 通过 `/proc/<pid>/root` 解析容器路径。TUI 里按 `L` 打开同一个列表。
 
+## 按分配调用栈看常驻内存
+
+`--pagefault` 采集一个进程的常驻匿名内存，而不是 CPU 时间：它现在仍然映射着的
+匿名内存，是哪些调用栈第一次碰到的。值的单位是**字节**，每一秒存的是那一秒的
+存活集合，所以每秒的总和就是进程常驻匿名内存的曲线，任意一秒都是它的火焰图。
+
+```bash
+# 一个正在运行的进程
+sudo ./build/bin/cpa monitor --pagefault --pid 12345
+
+# 冷启动：这个 cgroup 里第一个启动的 "server"，从它的 exec 开始
+# （动态链接器、libc 初始化、main() 以及之后的一切）
+sudo ./build/bin/cpa monitor --pagefault --cgroup system.slice/app.service \
+  --comm server --first_match
+
+# 记录每一页而不是 16 页取 1（精确，开销更大）
+sudo ./build/bin/cpa monitor --pagefault --pid 12345 --pf_sample_pages 1
+```
+
+- `--pagefault`：采集常驻匿名内存而不是 CPU 时间；
+- `--pf_sample_pages <N>`：4 KiB 页 N 取 1（2 的幂，1 到 512，默认 16）；更大的
+  页按比例，2 MiB THP 总是记录。
+
+进程是 `--pid`（一个），或者规则选择（`--comm`、`--exe`、`--cgroup`、
+`--container_pid`）加 `--first_match` 选中的那一个。`--children`、多个 pid、
+不带 `--first_match` 的规则、`--offcpu`、`--oneshot`、`--probe`、coredump 或
+exit 采集、`--kernel_stack`、`--datapath ringbuf`、`--record_interval` 不为 1
+以及 perf 后端，启动时都会报错。
+
+统计什么：
+
+- 进程缺页换入的匿名私有页（堆、匿名 `mmap`、线程栈、这些页的写时复制），只要
+  还映射着，就记在缺页时的调用栈上。不统计：文件页（包括私有文件映射的写时
+  复制）、共享内存、内核为自己分配的页；
+- 一个页在它的范围被成功的调用解除映射（`munmap`、`mremap` 缩小、`MAP_FIXED`
+  或 `MREMAP_FIXED` 覆盖、`brk` 缩小）或丢弃（`MADV_DONTNEED`、`MADV_FREE`、
+  `MADV_REMOVE`）时离开 profile；`mremap` 移动保留页和它的调用栈。`exec` 和
+  最后一个线程退出会清空存活集合；
+- 采样：每 N 个对齐的 4 KiB 页为一块，块内由地址的加盐哈希选出一个位置；落在
+  这个位置的页记为 N 页。一个 k 页的新页（THP，6.8+ 的多尺寸 THP）在 k >= N
+  时总是按实际大小记录，k < N 时覆盖了块内的位置才记录。估计是无偏的；2 MiB
+  THP 是精确的；
+- `--pid` 开始采集时已经常驻的页，从 `/proc/<pid>/pagemap` 读一次，记在
+  `[resident before profiling]` 上（`--first_match` 的进程没有：从它的 exec
+  开始跟踪）；
+- 没能记录调用栈的页仍然计数，记在 `[stack dropped]` 或压力标记上；
+- 存活集合不再精确时，日志会打 `pagefault: INCOMPLETE ...` 并说明原因（内核
+  缓冲区满放不下的页或释放、回溯太晚的分配、超过 200 ms 重排窗口的事件、读不出
+  大小的页）。
+
+读取时选单独一秒：`cpa show --starttime T --endtime T` 返回在 T 结束的那条
+记录，即 T-1 秒内那次快照时的存活集合。多秒的窗口会把各秒快照加起来。CPU 字段
+总是 0。
+
+内核（启动日志会写入口，`pagefault: new anonymous pages from ...`；
+`cpa capabilities` 中为 `pagefault`）：
+
+| 内核 | 新页来自 | 状态 |
+| --- | --- | --- |
+| 5.4 以前 | | 拒绝：perf 输出到满的缓冲区时失败不会告诉 BPF 程序，采样的页可能丢失而不报告 |
+| 5.4 - 5.18 | `page_add_new_anon_rmap(page, vma, address, compound)` | 支持 |
+| 5.19 - 6.2 | | 拒绝：这个函数去掉了区分 THP 的参数 |
+| 6.3 及以后 | 只用 `folio_add_new_anon_rmap()`，folio 大小通过内核 BTF 读取 | 支持；已验证 6.6 和 6.8，其他版本启动时给出警告 |
+
+6.3+ 没有 BTF、`struct folio` 布局本版本不认识（6.18 的 `memdesc_flags_t`）、
+16/64 KiB 页的内核都会拒绝并说明原因。所有 hook 都必须挂上，否则不启动。
+
+有意接受的限制：
+
+- 没有 hook 跟踪的内存释放或移动方式会留在 profile 里：`MADV_COLLAPSE`
+  （6.1+）、`UFFDIO_MOVE`（6.8+），以及 6.13 起进程对自己的 `process_madvise`
+  和 `MADV_GUARD_INSTALL`；
+- `mremap` 移动的范围保留在旧地址采样的页：如果之后（`fork` 后）发生写时复制，
+  这段范围最多可能多算一倍（只在 N 取 1 采样时）；
+- 两个线程同时修改同一范围时，按调用进入的时间排序；`madvise` 处理了部分范围后
+  以 `ENOMEM` 以外的错误失败，视为什么都没做；
+- 被换出的页留在 profile 里直到范围被释放；`MADV_FREE` 后、内核回收前又被写的
+  页，从此缺失；
+- glibc 复用已经碰过的堆内存不会产生新的缺页，所以泄漏的分配可能记在第一次碰
+  这块内存的调用栈上；用 `MALLOC_MMAP_THRESHOLD_=131072` 运行目标，让大块分配
+  使用新映射；
+- 只有 native 调用栈。存储的运行时重启（零点、超出大小限制）会从
+  `/proc/<pid>/pagemap` 重建存活集合，记在 `[resident before profiling]` 上。
+
 ## `cpa show`
 
 `cpa show` 用于读取 `cpa monitor` 生成的 profile 目录。
@@ -233,7 +317,9 @@ state 取值：`supported`、`unsupported`（内核没有）、`unavailable`（�
   定时采样、`--offcpu` / `--probe kprobe:...`、`--probe tracepoint:...` 加载的程序类型；
 - `process_exit`：每次运行都会挂的进程退出 tracepoint 程序；
 - `coredump`：`--enable_coredump_capture` 用的 `do_coredump` kprobe；
-- `ringbuf`：ring buffer 数据通路（`--datapath auto` 在有时使用）。
+- `ringbuf`：ring buffer 数据通路（`--datapath auto` 在有时使用）；
+- `pagefault`：`--pagefault` 获知新匿名页的内核入口（5.4 - 5.18，或带 BTF 的
+  6.3+；其他内核拒绝）。
 
 `cpa monitor` 选择 BPF 对象时读的就是这份缓存结果。只有某个 key 的含义改变时
 `schema_version` 才会变。

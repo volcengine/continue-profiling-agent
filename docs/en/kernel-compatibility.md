@@ -67,6 +67,10 @@ when the full object fails to load. The ring-buffer datapath is not used
 there. Validated on 4.14.81 (x86_64) with on-CPU, off-CPU and kernel-only
 sampling.
 
+`--pagefault` is not available before 5.4: a perf output into a full buffer
+fails there without telling the BPF program, so its accounting of sampled
+pages could not be exact. It refuses to start on those kernels, saying so.
+
 For distribution kernels, do not rely only on `uname -r`. Vendors often
 backport BPF and mm fixes without changing the upstream major/minor version.
 Check the vendor kernel changelog for the upstream fix commit before enabling

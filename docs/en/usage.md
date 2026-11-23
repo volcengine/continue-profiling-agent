@@ -189,6 +189,105 @@ overrides the tool), through the binary or a build-id debug file under
 container paths through `/proc/<pid>/root`. In the TUI, `L` opens the same
 list.
 
+## Resident Memory by Allocating Stack
+
+`--pagefault` profiles one process's resident anonymous memory instead of
+CPU time: which stacks first touched the anonymous memory it still has
+mapped. The value is **bytes**, and every second holds the live set of that
+second, so the per-second total is the process's resident anonymous memory
+curve and any single second is a flame graph of it.
+
+```bash
+# a running process
+sudo ./build/bin/cpa monitor --pagefault --pid 12345
+
+# cold start: the first "server" started in this cgroup, from its exec on
+# (dynamic loader, libc initialisation, main() and everything after)
+sudo ./build/bin/cpa monitor --pagefault --cgroup system.slice/app.service \
+  --comm server --first_match
+
+# every page instead of 1 in 16 (exact, more overhead)
+sudo ./build/bin/cpa monitor --pagefault --pid 12345 --pf_sample_pages 1
+```
+
+- `--pagefault`: profile resident anonymous memory instead of CPU time;
+- `--pf_sample_pages <N>`: record 1 in N 4 KiB pages (a power of two, 1 to
+  512, default 16); larger pages in proportion, a 2 MiB THP always.
+
+The process is `--pid` (one), or the one a rule selection (`--comm`, `--exe`,
+`--cgroup`, `--container_pid`) picks with `--first_match`. `--children`,
+several pids, rules without `--first_match`, `--offcpu`, `--oneshot`,
+`--probe`, coredump or exit capture, `--kernel_stack`, `--datapath ringbuf`,
+`--record_interval` other than 1 and the perf backend are refused at start.
+
+What is counted:
+
+- anonymous private pages the process faults in (heap, anonymous `mmap`,
+  thread stacks, copy on write of such pages), charged to the stack that
+  faulted them in as long as they stay mapped. Not counted: file pages
+  (also copy on write of a private file mapping), shared memory, pages the
+  kernel allocates for itself;
+- a page leaves the profile when its range is unmapped (`munmap`, `mremap`
+  shrink, `MAP_FIXED` or `MREMAP_FIXED` over it, `brk` shrink) or discarded
+  (`MADV_DONTNEED`, `MADV_FREE`, `MADV_REMOVE`) by a call that succeeded;
+  `mremap` moves keep the page and its stack. `exec` and the exit of the
+  last thread empty the live set;
+- sampling: each block of N aligned 4 KiB pages has one position in the
+  sample, picked by a salted hash of its address; a page there counts N
+  pages. A new page of k pages (a THP, a multi-size THP on 6.8+) with
+  k >= N is always recorded with its size, with k < N when it covers its
+  block's position. The estimate is unbiased; a 2 MiB THP is exact;
+- pages already resident when `--pid` profiling starts are found once in
+  `/proc/<pid>/pagemap` and charged to `[resident before profiling]` (a
+  `--first_match` process has none: it is followed from its exec);
+- a page whose stack could not be recorded still counts, under
+  `[stack dropped]` or the pressure marker;
+- when the live set can no longer be exact the log says
+  `pagefault: INCOMPLETE ...` with what happened (a page or release the
+  kernel had no buffer room for, an allocation unwound too late, an event
+  past the 200 ms reorder window, a page of a size that cannot be read).
+
+To read it, select a single second: `cpa show --starttime T --endtime T`
+returns the record ending at T, the live set as of the snapshot taken
+during T-1. A window of several seconds adds their snapshots up. The CPU
+field is always 0.
+
+Kernels (the start log names the entry, `pagefault: new anonymous pages from
+...`; `cpa capabilities` reports it as `pagefault`):
+
+| Kernel | New pages from | Status |
+| --- | --- | --- |
+| before 5.4 | | refused: a perf output into a full buffer fails without telling the BPF program, so a sampled page could be lost unreported |
+| 5.4 - 5.18 | `page_add_new_anon_rmap(page, vma, address, compound)` | supported |
+| 5.19 - 6.2 | | refused: the function lost the argument that tells a THP apart |
+| 6.3 and later | `folio_add_new_anon_rmap()` only, the folio's size read through the kernel BTF | supported; 6.6 and 6.8 verified, other series start with a warning |
+
+A kernel without BTF on 6.3+, a `struct folio` layout this build does not
+know (6.18's `memdesc_flags_t`), and kernels with 16/64 KiB pages are refused,
+saying why. Every hook must attach or the session does not start.
+
+Limits, by choice:
+
+- ways for memory to go or move that no hook follows stay in the profile:
+  `MADV_COLLAPSE` (6.1+), `UFFDIO_MOVE` (6.8+), and from 6.13
+  `process_madvise` of the process on itself and `MADV_GUARD_INSTALL`;
+- a range moved by `mremap` keeps the pages sampled at its old addresses: if
+  they are copied on write later (after a `fork`), the range can be
+  overestimated up to twice (1-in-N sampling only);
+- two threads changing one range at the same moment are ordered by the time
+  their calls were entered; an `madvise` that fails with an error other than
+  `ENOMEM` after doing part of its range counts as having done nothing;
+- swapped-out pages stay in the profile until their range is released; a
+  page written again after `MADV_FREE` before the kernel reclaimed it is
+  missing from then on;
+- glibc reuses heap memory it already touched without a new fault, so a
+  leaking allocation can be charged to the stack that touched that memory
+  first; run the target with `MALLOC_MMAP_THRESHOLD_=131072` to give large
+  blocks fresh mappings;
+- native stacks only. A runtime restart of the store (midnight, size limit)
+  rebuilds the live set from `/proc/<pid>/pagemap`, charged to
+  `[resident before profiling]`.
+
 ## `cpa show`
 
 `cpa show` reads a stored profile directory.
@@ -283,7 +382,9 @@ A state is `supported`, `unsupported` (the kernel lacks it), `unavailable`
   `--probe kprobe:...` and `--probe tracepoint:...` load;
 - `process_exit`: the exit tracepoint program every run attaches;
 - `coredump`: the `do_coredump` kprobe of `--enable_coredump_capture`;
-- `ringbuf`: the ring-buffer datapath (`--datapath auto` uses it when present).
+- `ringbuf`: the ring-buffer datapath (`--datapath auto` uses it when present);
+- `pagefault`: a kernel entry for `--pagefault`'s new anonymous pages (5.4 -
+  5.18, or 6.3+ with BTF; refused otherwise).
 
 `cpa monitor` reads the same cached results when it picks its BPF objects.
 `schema_version` changes only when a key changes meaning.
