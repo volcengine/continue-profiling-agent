@@ -589,6 +589,17 @@ static int cpa_bpf_exit_capture_configure(void *ctx)
 	const struct cpa_target_spec *spec = cpa_target_spec();
 	char err[320];
 
+	/*
+	 * Coredump capture rides on the on-CPU sampler's buffer and filters:
+	 * the off-CPU, one-shot and probe paths never attach it, so asking for
+	 * it there is refused rather than silently dropped.
+	 */
+	if (atoi(get_arg_by_name(ctx, "enable_coredump_capture")) &&
+	    (atoi(get_arg_by_name(ctx, "offcpu")) || atoi(get_arg_by_name(ctx, "oneshot")) ||
+	     !cli_arg_is_null_default(get_arg_by_name(ctx, "probe")))) {
+		CLI_ERROR("--enable_coredump_capture only supports continuous bpf oncpu sampling");
+		return -1;
+	}
 	exit_capture = atoi(get_arg_by_name(ctx, "enable_exit_capture")) != 0;
 	atomic_store(&exit_capture_count, 0);
 	atomic_store(&exit_env_mismatch_drop_count, 0);
