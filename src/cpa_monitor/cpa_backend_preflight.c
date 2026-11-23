@@ -48,6 +48,19 @@ static void cpa_mode_init(struct cpa_monitor_mode *mode, void *ctx)
 	mode->kernel_stack = atoi(get_arg_by_name(ctx, "kernel_stack")) != 0;
 	mode->probe_enabled = !cli_arg_is_null_default(mode->probe_name);
 	mode->comm_filter = !cli_arg_is_null_default(mode->comm);
+	/* every process selection is done in BPF */
+	static const char *const selection_args[] = {
+		"thread_comm", "exe", "cgroup", "container_pid", "startup_window",
+	};
+	static const char *const selection_flags[] = {
+		"cgroup_recursive", "children", "new_only", "first_match",
+	};
+	for (size_t i = 0; i < sizeof(selection_args) / sizeof(selection_args[0]); i++)
+		if (!cli_arg_is_null_default(get_arg_by_name(ctx, selection_args[i])))
+			mode->comm_filter = true;
+	for (size_t i = 0; i < sizeof(selection_flags) / sizeof(selection_flags[0]); i++)
+		if (atoi(get_arg_by_name(ctx, selection_flags[i])) != 0)
+			mode->comm_filter = true;
 }
 
 static int cpa_append_reason(char *buf, size_t size, const char *fmt, ...)
@@ -436,7 +449,7 @@ static bool cpa_bpf_mode_can_fallback_to_perf(const struct cpa_monitor_mode *mod
 static int cpa_reject_perf_backend(const struct cpa_monitor_mode *mode)
 {
 	if (!strcmp(mode->backend, "perf") && cpa_perf_mode_uses_bpf_only_features(mode)) {
-		CLI_ERROR("perf backend only supports on-cpu continuous profiling; --oneshot, --offcpu, --probe, --pid, --comm, --kernel_stack, and non-default --stack_size require bpf backend");
+		CLI_ERROR("perf backend only supports on-cpu continuous profiling; --oneshot, --offcpu, --probe, --kernel_stack, non-default --stack_size and every process selection (--pid, --comm, --thread_comm, --exe, --cgroup, --container_pid, --children, --new_only, --first_match, --startup_window) require bpf backend");
 		return -EINVAL;
 	}
 

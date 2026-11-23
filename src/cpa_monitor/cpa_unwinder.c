@@ -3,6 +3,7 @@
 
 #include "cpa_unwinder.h"
 #include "cpa_sample_pool.h"
+#include "cpa_target_ctl.h"
 #include "cli_stackmap.h"
 #include "cli_stackmap_private.h"
 #include "cpa_capture_mode.h"
@@ -702,6 +703,7 @@ static void cpa_handle_pid_exit_events(unsigned long sample_ts)
 			break;
 		exit_event = queue_pop(&pid_exit_queue);
 		gu_event_occur(gu_ctx, GU_EVENT_PROCESS_EXIT, &exit_event->gu);
+		cpa_target_on_exit(exit_event->gu.pid);
 		free(exit_event);
 	}
 }
@@ -970,6 +972,16 @@ int cpa_add_stack_event(struct stack_sample *sample)
 	int ret = queue_push(&stack_queue, sample);
 	pthread_mutex_unlock(&stack_queue_lock);
 	return ret;
+}
+
+unsigned int cpa_unwinder_pending_samples(void)
+{
+	unsigned int n;
+
+	pthread_mutex_lock(&stack_queue_lock);
+	n = queue_count(&stack_queue);
+	pthread_mutex_unlock(&stack_queue_lock);
+	return n;
 }
 
 void cpa_unwinder_drain_pending(void)

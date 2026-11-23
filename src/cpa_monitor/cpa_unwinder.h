@@ -27,6 +27,9 @@
  */
 int cpa_add_stack_event(struct stack_sample *sample);
 
+/* Samples queued but not yet unwound. */
+unsigned int cpa_unwinder_pending_samples(void);
+
 /**
  * struct exit_event - process-exit record consumed by the unwinder loop
  * @exit_ts: process exit timestamp

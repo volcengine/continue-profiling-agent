@@ -13,6 +13,7 @@
 #include "cpa_unwinder.h"
 #include "cpa_sample_pool.h"
 #include "cpa_stack_sample_builder.h"
+#include "cpa_target_ctl.h"
 #include "cpa_drop_policy.h"
 #include <stdlib.h>
 #include <errno.h>
@@ -214,8 +215,16 @@ static void cpa_bpf_exec_counter_destroy(void)
 
 static char *probe = NULL;
 
+static bool target_ctl_enabled;
+
 static void cpa_bpf_capture_disable_modules(void)
 {
+	/* before the modules whose maps the controller touches */
+	cpa_target_shutdown();
+	if (target_ctl_enabled) {
+		DISABLE_MODULE_BPF(target_ctl);
+		target_ctl_enabled = false;
+	}
 	if (process_exit_enabled) {
 		DISABLE_MODULE_BPF(process_exit);
 		process_exit_enabled = false;
@@ -365,8 +374,8 @@ static enum cpa_worker_init_result cpa_bpf_offcpu_capture_init(void *ctx)
 
 	struct offcpu_capture_ctx offcpu_capture_init_ctx;
 
-	const char *comm = get_arg_by_name(ctx, "comm");
-	if (cli_arg_is_null_default(comm))
+	const char *comm = cpa_target_spec()->legacy_thread_comm;
+	if (!comm[0])
 		comm = NULL;
 
 	if (comm)
@@ -375,6 +384,7 @@ static enum cpa_worker_init_result cpa_bpf_offcpu_capture_init(void *ctx)
 		memset(offcpu_capture_init_ctx.comm, 0, TASK_COMM_LEN);
 
 	offcpu_capture_init_ctx.pid = bpf_capture_config.pid;
+	offcpu_capture_init_ctx.target_dynamic = cpa_target_is_dynamic();
 
 	if (setup_offcpu_capture_event(bpf_capture_config.freq, stack_capture_event_process, &offcpu_capture_init_ctx) < 0) {
 		CLI_ERROR("Failed to setup stack capture event");
@@ -448,7 +458,7 @@ static enum cpa_worker_init_result cpa_bpf_oncpu_capture_init(void *ctx)
 	memset(&stack_capture_init_ctx, 0, sizeof(stack_capture_init_ctx));
 
 	const char *probe_name = get_arg_by_name(ctx, "probe");
-	const char *comm = get_arg_by_name(ctx, "comm");
+	const char *comm = cpa_target_spec()->legacy_thread_comm;
 	if (cli_arg_is_null_default(probe_name)) {
 		stack_capture_init_ctx.probe_name = NULL;
 	} else {
@@ -461,7 +471,7 @@ static enum cpa_worker_init_result cpa_bpf_oncpu_capture_init(void *ctx)
 	}
 
 	memset(stack_capture_init_ctx.comm, 0, TASK_COMM_LEN);
-	if (!cli_arg_is_null_default(comm))
+	if (comm[0])
 		snprintf(stack_capture_init_ctx.comm, sizeof(stack_capture_init_ctx.comm), "%s", comm);
 
 {
@@ -487,6 +497,7 @@ static enum cpa_worker_init_result cpa_bpf_oncpu_capture_init(void *ctx)
 stack_capture_init_ctx.enable_coredump_capture = coredump_enabled;
 	stack_capture_init_ctx.only_kernel = kernel_only_fastpath;
 	stack_capture_init_ctx.pid = bpf_capture_config.pid;
+	stack_capture_init_ctx.target_dynamic = cpa_target_is_dynamic();
 
 	if (setup_stack_capture_event(bpf_capture_config.freq, stack_capture_event_process, &stack_capture_init_ctx) < 0) {
 		CLI_ERROR("Failed to setup stack capture event");
@@ -531,11 +542,12 @@ static enum cpa_worker_init_result cpa_bpf_capture_init_fn(void *ctx, void *work
 		return CPA_INIT_FAILED;
 	}
 
-	bpf_capture_config.pid = atoi(get_arg_by_name(ctx, "pid"));
-	if (bpf_capture_config.pid < 0) {
-		CLI_ERROR("Please use pid >= 0");
+	/* BPF and /proc must agree on process start times */
+	if (cpa_check_time_namespace())
 		return CPA_INIT_FAILED;
-	}
+	if (cpa_target_configure(ctx))
+		return CPA_INIT_FAILED;
+	bpf_capture_config.pid = cpa_target_is_dynamic() ? 0 : cpa_target_spec()->legacy_pid;
 
 	bpf_exec_counter = cli_counter_init("bpf_exec_time", CLI_COUNTER_TYPE_TIME_NS);
 	if (!bpf_exec_counter)
@@ -561,6 +573,21 @@ static enum cpa_worker_init_result cpa_bpf_capture_init_fn(void *ctx, void *work
 		return CPA_INIT_FAILED;
 	}
 
+	/* the owner of the target set loads first: capture objects adopt its map */
+	if (cpa_target_is_dynamic()) {
+		if (INIT_MODULE_BPF(target_ctl)) {
+			cpa_bpf_capture_disable_modules();
+			cpa_bpf_exec_counter_destroy();
+			return CPA_INIT_FAILED;
+		}
+		target_ctl_enabled = true;
+		if (cpa_target_prepare()) {
+			cpa_bpf_capture_disable_modules();
+			cpa_bpf_exec_counter_destroy();
+			return CPA_INIT_FAILED;
+		}
+	}
+
 	int offcpu = atoi(get_arg_by_name(ctx, "offcpu"));
 	if (offcpu) {
 		if (cpa_bpf_offcpu_capture_init(ctx) != CPA_INIT_SUCCESS) {
@@ -574,6 +601,12 @@ static enum cpa_worker_init_result cpa_bpf_capture_init_fn(void *ctx, void *work
 			cpa_bpf_exec_counter_destroy();
 			return CPA_INIT_FAILED;
 		}
+	}
+
+	if (cpa_target_start(!offcpu, offcpu)) {
+		cpa_bpf_capture_disable_modules();
+		cpa_bpf_exec_counter_destroy();
+		return CPA_INIT_FAILED;
 	}
 
 	atomic_store_explicit(&capture_state, STACK_PROCESS_STATE_RUNNING, memory_order_release);

@@ -67,6 +67,8 @@ set(CPA_MONITOR_SOURCES
     "${CPA_SRC_DIR}/cpa_monitor/cpa_runtime.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_bpf_capture.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_sample_pool.c"
+    "${CPA_SRC_DIR}/cpa_monitor/cpa_target.c"
+    "${CPA_SRC_DIR}/cpa_monitor/cpa_target_ctl.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_stack_sample_builder.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_perf_capture.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_unwinder.c"
