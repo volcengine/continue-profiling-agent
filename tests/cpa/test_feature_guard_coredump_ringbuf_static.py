@@ -57,7 +57,10 @@ def test_ringbuf_dual_datapath():
     loader = (BPF / "stack_capture.c").read_text(encoding="utf-8")
     assert "stack_capture_ringbuf_bpf__open" in loader
     assert "bpf_event_poll_register_ringbuf" in loader
-    assert "libbpf_probe_bpf_map_type" in loader
+    # the ring buffer is taken only when the kernel has it
+    assert "CPA_CAP_RINGBUF" in loader
+    caps = (REPO / "bpf/src/common/capabilities_libbpf.c").read_text(encoding="utf-8")
+    assert "libbpf_probe_bpf_map_type(BPF_MAP_TYPE_RINGBUF" in caps
     poll = (REPO / "bpf/src/common/bpf_event_poll.c").read_text(encoding="utf-8")
     assert "bpf_event_poll_register_ringbuf" in poll
     assert "ring_buffer__consume" in poll

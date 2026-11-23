@@ -18,6 +18,7 @@
 #include "core.h"
 #include "trace_helpers.h"
 #include <cpa_bpf/bpf_event.h>
+#include <cpa_bpf/capabilities.h>
 #include "bpf_event_poll.h"
 #include "target_ctl.h"
 #include "stack_capture.h"
@@ -129,7 +130,7 @@ static int stack_capture_size = 8192;
 
 static bool ringbuf_map_supported(void)
 {
-return libbpf_probe_bpf_map_type(BPF_MAP_TYPE_RINGBUF, NULL) > 0;
+	return cpa_capability_supported(cpa_capabilities_get(), CPA_CAP_RINGBUF);
 }
 
 static void sc_preload_resize(struct bpf_object *bo, bool ring)
@@ -146,10 +147,14 @@ static void sc_preload_resize(struct bpf_object *bo, bool ring)
 			ring_size_bytes);
 }
 
+/* The full objects call bpf_get_stack from all three program types. */
 static bool get_stack_supported(void)
 {
-	return libbpf_probe_bpf_helper(BPF_PROG_TYPE_PERF_EVENT,
-				       BPF_FUNC_get_stack, NULL) > 0;
+	const struct cpa_capability_set *caps = cpa_capabilities_get();
+
+	return cpa_capability_supported(caps, CPA_CAP_GET_STACK_PERF_EVENT) &&
+	       cpa_capability_supported(caps, CPA_CAP_GET_STACK_KPROBE) &&
+	       cpa_capability_supported(caps, CPA_CAP_GET_STACK_TRACEPOINT);
 }
 
 static int load_ringbuf(const struct bpf_object_open_opts *optsp)

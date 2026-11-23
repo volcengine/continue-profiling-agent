@@ -14,6 +14,7 @@
 #include "core.h"
 #include "trace_helpers.h"
 #include <cpa_bpf/bpf_event.h>
+#include <cpa_bpf/capabilities.h>
 #include "bpf_event_poll.h"
 #include "offcpu_capture.h"
 #include "target_ctl.h"
@@ -82,8 +83,7 @@ static int oc_map_fd(const char *name)
  */
 static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 {
-	bool has_get_stack = libbpf_probe_bpf_helper(BPF_PROG_TYPE_KPROBE,
-						     BPF_FUNC_get_stack, NULL) > 0;
+	bool has_get_stack = cpa_capability_supported(cpa_capabilities_get(), CPA_CAP_GET_STACK_KPROBE);
 	int ret = -1;
 
 	if (has_get_stack) {
