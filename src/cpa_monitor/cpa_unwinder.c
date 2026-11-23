@@ -121,7 +121,7 @@ static uint64_t cpa_monotonic_ns(void)
 static int cpa_unwind_bench_bucket(uint64_t duration_ns)
 {
 	static const uint64_t upper_bounds_ns[CPA_UNWIND_BENCH_BUCKETS] = {
-		1ULL * CPA_NS_PER_US, 4ULL * CPA_NS_PER_US, 16ULL * CPA_NS_PER_US, 64ULL * CPA_NS_PER_US, 256ULL * CPA_NS_PER_US, 512ULL * CPA_NS_PER_US, 1024ULL * CPA_NS_PER_US, 2048ULL * CPA_NS_PER_US, 4096ULL * CPA_NS_PER_US,
+		1ULL * CPA_NS_PER_US, 4ULL * CPA_NS_PER_US, 16ULL * CPA_NS_PER_US, 64ULL * CPA_NS_PER_US, 256ULL * CPA_NS_PER_US, 512ULL * CPA_NS_PER_US, 1024ULL * CPA_NS_PER_US, 2048ULL * CPA_NS_PER_US, 4096ULL * CPA_NS_PER_US, UINT64_MAX,
 	};
 
 	for (unsigned int i = 0; i < CPA_UNWIND_BENCH_BUCKETS; i++) {

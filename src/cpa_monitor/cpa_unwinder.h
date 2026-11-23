@@ -75,7 +75,7 @@ struct unwinder_stat {
  */
 void cpa_get_unwinder_stat(struct unwinder_stat *stat);
 
-#define CPA_UNWIND_BENCH_BUCKETS 9
+#define CPA_UNWIND_BENCH_BUCKETS 10
 
 /**
  * struct cpa_unwind_bench_stat - DWARF unwind benchmark statistics

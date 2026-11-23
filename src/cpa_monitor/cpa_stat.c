@@ -28,7 +28,7 @@ struct cpa_stat_monitor_ctx cpa_stat = {
 };
 
 static const char *const bench_bucket_labels[CPA_UNWIND_BENCH_BUCKETS] = {
-	"<1us", "1-4us", "4-16us", "16-64us", "64-256us", "256-512us", "512-1024us", "1024-2048us", "2048-4096us",
+	"<1us", "1-4us", "4-16us", "16-64us", "64-256us", "256-512us", "512-1024us", "1024-2048us", "2048-4096us", ">=4096us",
 };
 
 static uint64_t cpa_stat_monotonic_ns(void)
