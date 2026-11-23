@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 ByteDance
 
 #include "cli.h"
+#include <sched.h>
+#include <stdatomic.h>
 
 static bool bpf_inited;
 
@@ -35,20 +37,63 @@ int init_module_bpf(void *ctx, int module)
 	return 0;
 }
 
-static volatile sig_atomic_t g_stop_flag;
-
 /*
- * Signal handlers only set this async-signal-safe flag. Runtime, timer, and
- * unwinder loops observe it at their own safe points.
+ * The stop flag and its wake-up hook.  set_stop() runs in signal handlers,
+ * on any thread and in ordinary code: everything here is a lock-free atomic,
+ * so it stays async-signal-safe.  Runtime, timer and unwinder loops observe
+ * the flag at their own safe points; the hook wakes the ones that sleep.
  */
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2 && ATOMIC_POINTER_LOCK_FREE == 2,
+	       "set_stop() needs lock-free atomics to stay async-signal-safe");
+
+typedef void (*stop_notify_fn)(void);
+
+static atomic_int g_stop_flag;
+static _Atomic(stop_notify_fn) stop_notify;
+/* set_stop() calls between announcing themselves and leaving the hook */
+static atomic_int stop_notify_active;
+
 int should_stop(void)
 {
-	return g_stop_flag;
+	return atomic_load_explicit(&g_stop_flag, memory_order_relaxed);
+}
+
+int set_stop_notify(void (*fn)(void))
+{
+	stop_notify_fn none = NULL;
+
+	if (!fn)
+		return -EINVAL;
+	if (atomic_compare_exchange_strong(&stop_notify, &none, fn) || none == fn)
+		return 0;
+	return -EBUSY;
+}
+
+/*
+ * A set_stop() announces itself before it loads the hook, and this clears
+ * the hook before it reads the announcements (both sequentially
+ * consistent): either the call sees NULL or the wait sees the call.
+ */
+void clear_stop_notify(void (*fn)(void))
+{
+	stop_notify_fn mine = fn;
+
+	if (!fn || !atomic_compare_exchange_strong(&stop_notify, &mine, NULL))
+		return;
+	while (atomic_load(&stop_notify_active))
+		sched_yield();
 }
 
 void set_stop(void)
 {
-	g_stop_flag = true;
+	stop_notify_fn fn;
+
+	atomic_store_explicit(&g_stop_flag, 1, memory_order_relaxed);
+	atomic_fetch_add(&stop_notify_active, 1);
+	fn = atomic_load(&stop_notify);
+	if (fn)
+		fn();
+	atomic_fetch_sub(&stop_notify_active, 1);
 }
 
 char *read_file_content(const char *path)
@@ -1068,10 +1113,12 @@ cleanup:
 }
 
 #define ENV_BUFFER_SIZE 8192
-static char env_buffer[ENV_BUFFER_SIZE + 1];
+
 
 char *get_env_var_by_pid(pid_t pid, char **var_names, int var_name_count)
 {
+	/* each call its own: unwind workers and capture threads read at once */
+	char env_buffer[ENV_BUFFER_SIZE + 1];
 	char path[256];
 	char *result = NULL;
 	int found = 0;

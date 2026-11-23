@@ -18,7 +18,6 @@
  * always be staged in one piece; a longer string corrupts the zstd writer's
  * size accounting and can wedge the saver.
  */
-#define CLI_STACKMAP_FRAME_MAX_LEN 8192
 
 struct cli_stackmap_entry *cli_stackmap_entry_init(void)
 {

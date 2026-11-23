@@ -66,9 +66,24 @@ int init_module_bpf(void *ctx, int module);
 int should_stop(void);
 
 /**
- * set_stop - set global stop flag.
+ * set_stop - set global stop flag, then run the stop-notify hook if one is
+ * published.  Async-signal-safe.
  */
 void set_stop(void);
+
+/**
+ * set_stop_notify - publish @fn as the one hook set_stop() runs, to wake
+ * threads that sleep.  @fn must be async-signal-safe.
+ * @return: 0, also if @fn already is the hook; -EBUSY while another one is.
+ */
+int set_stop_notify(void (*fn)(void));
+
+/**
+ * clear_stop_notify - retire @fn if it is the hook (nothing otherwise), and
+ * return only once no set_stop() can still be running it.  Not from a signal
+ * handler.
+ */
+void clear_stop_notify(void (*fn)(void));
 
 /**
  * read_file_content - read whole file content into a heap buffer.

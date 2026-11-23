@@ -81,6 +81,9 @@ struct cli_stackmap *cli_stackmap_init(void);
  */
 void cli_stackmap_destroy(struct cli_stackmap *map);
 
+/* The longest frame string a stack map interns; cpa_frames.c truncates alike. */
+#define CLI_STACKMAP_FRAME_MAX_LEN 8192
+
 /**
  * cli_stackmap_append - append one frame string to current stack entry.
  * @map: target stackmap.
