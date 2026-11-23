@@ -85,8 +85,11 @@ sudo ./build/bin/cpa monitor \
   `cpu` 挂载点或 cgroup v2 挂载点（最多 8 个）；加 `--cgroup_recursive` 包含下层
   cgroup（最多 8 层）。需要内核的 cgroupfs 向用户态提供 cgroup id（upstream 4.15 及以上，部分发行版内核更早就有）；否则直接报错。
 - `--container_pid <pid>`：这个进程所在 cgroup 及其下层的所有进程
-- `--children`：同时采集被选进程启动的子进程，以及子进程的子进程
-- `--new_only`：只选 monitor 启动之后才启动的进程
+- `--children`：同时采集被选进程启动的子进程，以及子进程的子进程，包括 monitor
+  启动时已经在运行的
+- `--new_only`：只选 monitor 就绪之后才启动的进程。就绪时日志打印
+  `target: waiting for a matching process`（启动约需一秒，老内核更久）；在这行
+  之前启动的进程不会被选中
 - `--first_match`：只选第一个启动并匹配的进程；它退出或采集时间窗结束后，本次
   运行自动结束
 - `--startup_window <sec>`：每个被选中的进程只采集被选中后的这么多秒

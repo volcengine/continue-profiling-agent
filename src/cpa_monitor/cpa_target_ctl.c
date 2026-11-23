@@ -82,6 +82,7 @@ enum session_phase {
 struct proc_info {
 	char comm[CPA_TARGET_COMM_LEN];
 	char state;
+	uint32_t ppid;
 	uint64_t identity;	/* start ticks on the boot-time clock */
 	unsigned int flags;
 };
@@ -307,10 +308,12 @@ static int read_stat_file(const char *path, struct proc_info *info)
 		len = sizeof(info->comm) - 1;
 	memcpy(info->comm, open_paren + 1, len);
 
-	/* fields after "(comm)": 3=state ... 9=flags ... 22=starttime */
+	/* fields after "(comm)": 3=state 4=ppid ... 9=flags ... 22=starttime */
 	p = close_paren + 2;
 	info->state = *p;
 	for (field = 3; field <= 22 && p && *p; field++) {
+		if (field == 4)
+			info->ppid = (uint32_t)strtoul(p, NULL, 10);
 		if (field == 9)
 			info->flags = (unsigned int)strtoul(p, NULL, 10);
 		if (field == 22)
@@ -615,6 +618,59 @@ static void scan_proc(void)
 			track_instance((uint32_t)pid, &info, TARGET_ORIGIN_SCAN);
 	}
 	closedir(dir);
+}
+
+/* Is the instance @pid (as /proc shows it now) selected and in its window? */
+static bool instance_tracked(uint32_t pid, const struct proc_info *info)
+{
+	struct target_key key = instance_key(pid, info->identity);
+	struct target_val val;
+
+	if (bpf_map_lookup_elem(tc.owner_fd, &key, &val))
+		return false;
+	return val.state == TARGET_STATE_TRACKED &&
+	       (!val.deadline_ns || mono_ns() < val.deadline_ns);
+}
+
+/*
+ * --children: the fork hook follows forks of processes already tracked, so
+ * the descendants that were running before their ancestor was seeded come
+ * from /proc.  Once a parent is seeded the hook sees its later forks, so a
+ * child is either found here or by the hook.  A pass adds the children of
+ * what the previous one added, until none is new.
+ */
+static void scan_children(void)
+{
+	uint32_t self = (uint32_t)getpid();
+	bool added = true;
+
+	for (int pass = 0; added && pass < 64; pass++) {
+		DIR *dir = opendir("/proc");
+		struct dirent *de;
+
+		if (!dir)
+			return;
+		added = false;
+		while ((de = readdir(dir)) != NULL) {
+			struct proc_info info, parent;
+			char *end = NULL;
+			unsigned long pid = strtoul(de->d_name, &end, 10);
+
+			if (!end || *end || pid == 0 || pid == self)
+				continue;
+			if (read_proc_stat((uint32_t)pid, &info) ||
+			    (info.flags & TARGET_KTHREAD_FLAG) ||
+			    thread_state_exited(info.state) || info.ppid == 0)
+				continue;
+			if (instance_tracked((uint32_t)pid, &info) ||
+			    read_proc_stat(info.ppid, &parent) ||
+			    !instance_tracked(info.ppid, &parent))
+				continue;
+			track_instance((uint32_t)pid, &info, TARGET_ORIGIN_CHILD);
+			added = true;
+		}
+		closedir(dir);
+	}
 }
 
 static int open_session(void)
@@ -1183,6 +1239,8 @@ int cpa_target_start(bool oncpu, bool offcpu)
 		if (ret)
 			return ret;
 	}
+	if (tc.spec.children && !tc.spec.new_only)
+		scan_children();
 	pthread_mutex_lock(&tc.index_lock);
 	if (!HASH_COUNT(tc.index))
 		CLI_OUTPUT("target: waiting for a matching process");

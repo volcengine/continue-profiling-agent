@@ -47,8 +47,8 @@ struct arg_parse_item arg_parse_item_list[] = {
 	ARG_DEFINE("cgroup", NO_SINGLE_NAME, "sample processes in one of these cgroups (paths relative to the cpu or cgroup v2 mount, comma separated, at most 8). Requires the BPF backend.", true),
 	ARG_DEFINE("cgroup_recursive", NO_SINGLE_NAME, "with --cgroup, also sample processes in descendant cgroups (up to 8 levels).", false),
 	ARG_DEFINE("container_pid", NO_SINGLE_NAME, "sample the processes in the cgroup of this pid and below it. Requires the BPF backend.", true),
-	ARG_DEFINE("children", NO_SINGLE_NAME, "also sample the processes the selected ones start, and theirs.", false),
-	ARG_DEFINE("new_only", NO_SINGLE_NAME, "select only processes that start after the monitor, not running ones.", false),
+	ARG_DEFINE("children", NO_SINGLE_NAME, "also sample the processes the selected ones start, and theirs, including running ones.", false),
+	ARG_DEFINE("new_only", NO_SINGLE_NAME, "select only processes that start once the monitor is ready (it logs \"waiting for a matching process\"), not running ones.", false),
 	ARG_DEFINE("first_match", NO_SINGLE_NAME, "sample the first process that starts and matches, then stop when it exits or its window ends.", false),
 	ARG_DEFINE("startup_window", NO_SINGLE_NAME, "sample each selected process for this many seconds after it is selected.", true),
 

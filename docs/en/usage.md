@@ -96,8 +96,12 @@ when the command line is read.
   whose cgroupfs gives cgroup ids to user space (upstream 4.15 and later; some
   vendor kernels earlier); refused otherwise.
 - `--container_pid <pid>`: the processes in that process' cgroup and below it
-- `--children`: also the processes the selected ones start, and theirs
-- `--new_only`: only processes that start after the monitor
+- `--children`: also the processes the selected ones start, and theirs,
+  including those already running when the monitor starts
+- `--new_only`: only processes that start after the monitor is ready, which
+  it logs as `target: waiting for a matching process` (startup takes about a
+  second, longer on old kernels); a process started before that line is not
+  selected
 - `--first_match`: the first process that starts and matches, nothing else;
   the run stops once it exits or its startup window ends
 - `--startup_window <sec>`: sample each selected process for this long after

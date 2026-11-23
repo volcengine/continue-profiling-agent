@@ -50,6 +50,28 @@ def _pids_of(seen: dict, name: str) -> set:
     return {int(pid) for (proc, pid) in seen if proc == name}
 
 
+READY = "target: waiting for a matching process"
+
+
+def _start_monitor(store: Path, log: Path, args: list) -> subprocess.Popen:
+    """Start `cpa monitor` in the background, its output going to @log."""
+    store.mkdir(parents=True, exist_ok=True)
+    with open(log, "w") as out:
+        return subprocess.Popen(
+            [os.environ.get("TEST_CPA_PATH", "./build/bin/cpa"), "monitor",
+             "--store_dir", str(store), *args],
+            stdout=out, stderr=subprocess.STDOUT)
+
+
+def _wait_ready(monitor: subprocess.Popen, log: Path, timeout: float = 30) -> None:
+    """New processes count once the monitor says it waits for them."""
+    deadline = time.monotonic() + timeout
+    while READY not in log.read_text(errors="replace"):
+        assert monitor.poll() is None, log.read_text(errors="replace")
+        assert time.monotonic() < deadline, log.read_text(errors="replace")
+        time.sleep(0.1)
+
+
 def _monitor(store: Path, args: list, run_time: int = 5) -> None:
     store.mkdir(parents=True, exist_ok=True)
     run_cpa_monitor(str(store), run_time=run_time,
@@ -97,63 +119,58 @@ def test_exe_selects_by_executable(tmp_path, pytestconfig):
 def test_new_only_skips_running_processes(tmp_path, pytestconfig):
     exe = _spinner(tmp_path, "selN")
     old = _start(exe)
-    store = tmp_path / "store"
-    store.mkdir()
-    late = None
+    store, log = tmp_path / "store", tmp_path / "monitor.log"
+    monitor = late = None
     try:
         time.sleep(0.5)
-        monitor = subprocess.Popen(
-            [os.environ.get("TEST_CPA_PATH", "./build/bin/cpa"), "monitor",
-             "--store_dir", str(store), "--comm=selN", "--new_only",
-             "--duration", "6"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
+        monitor = _start_monitor(store, log, ["--comm=selN", "--new_only", "--duration", "6"])
+        _wait_ready(monitor, log)
         late = _start(exe)
-        assert monitor.wait(timeout=30) == 0
+        assert monitor.wait(timeout=30) == 0, log.read_text()
         seen = _sampled(store, pytestconfig)
     finally:
-        _stop(old, *(p for p in [late] if p))
+        _stop(old, *(p for p in [late, monitor] if p))
     assert _pids_of(seen, "selN") == {late.pid}, seen
 
 
 def test_children_follow_the_selected_process(tmp_path, pytestconfig):
-    spinner = _spinner(tmp_path, "selKid")
+    # selPre runs before cpa starts, selKid is started while it runs
+    early, late = _spinner(tmp_path, "selPre"), _spinner(tmp_path, "selKid")
     parent = subprocess.Popen(
-        ["/bin/sh", "-c", f"sleep 1.5; {spinner} > /dev/null & wait"])
+        ["/bin/sh", "-c",
+         f"{early} > /dev/null & sleep 2.5; {late} > /dev/null & wait"])
     other = _start(_spinner(tmp_path, "selOther"))
     try:
+        time.sleep(0.5)
         _monitor(tmp_path / "store", [f"--pid={parent.pid}", "--children"])
         seen = _sampled(tmp_path / "store", pytestconfig)
     finally:
-        subprocess.run(["pkill", "-f", str(spinner)], check=False)
+        subprocess.run(["pkill", "-f", str(tmp_path / "sel")], check=False)
         _stop(parent, other)
+    assert _pids_of(seen, "selPre"), seen
     assert _pids_of(seen, "selKid"), seen
     assert not _pids_of(seen, "selOther"), seen
 
 
 def test_first_match_samples_one_process_and_stops(tmp_path, pytestconfig):
     exe = _spinner(tmp_path, "selF")
-    store = tmp_path / "store"
-    store.mkdir()
+    store, log = tmp_path / "store", tmp_path / "monitor.log"
+    monitor = None
     procs = []
     try:
-        monitor = subprocess.Popen(
-            [os.environ.get("TEST_CPA_PATH", "./build/bin/cpa"), "monitor",
-             "--store_dir", str(store), "--comm=selF", "--first_match",
-             "--duration", "30"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        time.sleep(1.5)
+        monitor = _start_monitor(store, log, ["--comm=selF", "--first_match", "--duration", "30"])
+        _wait_ready(monitor, log)
         procs = [_start(exe), _start(exe)]
         time.sleep(2)
         _stop(procs[0])
         _stop(procs[1])
         # the run ends by itself once its one process is gone
-        out, _ = monitor.communicate(timeout=25)
-        assert monitor.returncode == 0, out
+        assert monitor.wait(timeout=25) == 0, log.read_text()
+        out = log.read_text()
         assert "first_match finished" in out, out
         seen = _sampled(store, pytestconfig)
     finally:
-        _stop(*procs)
+        _stop(*procs, *(p for p in [monitor] if p))
     assert len(_pids_of(seen, "selF")) == 1, seen
 
 
