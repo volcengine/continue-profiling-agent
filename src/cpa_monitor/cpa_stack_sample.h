@@ -37,6 +37,7 @@
  * @comm: thread comm recorded for the sample
  * @group_comm: process/group comm recorded for the sample
  * @info: libgunwinder user-stack/register snapshot, or NULL for kernel-only paths
+ * @pf: --pagefault: the sampled page (PF_META_VALID in its flags), zero otherwise
  */
 struct stack_sample {
 	int type;
@@ -54,6 +55,7 @@ struct stack_sample {
 	char comm[TASK_COMM_LEN];
 	char group_comm[TASK_COMM_LEN];
 	struct gu_stack_info *info;
+	struct pf_sample_meta pf;
 };
 
 /**

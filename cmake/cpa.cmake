@@ -71,6 +71,8 @@ set(CPA_MONITOR_SOURCES
     "${CPA_SRC_DIR}/cpa_monitor/cpa_target.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_target_ctl.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_exit_env.c"
+    "${CPA_SRC_DIR}/cpa_monitor/cpa_pagefault.c"
+    "${CPA_SRC_DIR}/cpa_monitor/cpa_pagefault_tracker.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_stack_sample_builder.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_perf_capture.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_unwinder.c"
@@ -87,6 +89,7 @@ set(CPA_MONITOR_SOURCES
 
 set(CPA_WORKER_C_FILES
     "${CPA_SRC_DIR}/cpa_monitor/cpa_bpf_capture.c"
+    "${CPA_SRC_DIR}/cpa_monitor/cpa_pagefault.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_perf_capture.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_unwinder.c"
     "${CPA_SRC_DIR}/cpa_monitor/cpa_env.c"

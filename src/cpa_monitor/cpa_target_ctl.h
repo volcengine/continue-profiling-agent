@@ -34,6 +34,9 @@ bool cpa_target_needs_bpf(void);
 
 const struct cpa_target_spec *cpa_target_spec(void);
 
+/* The process --first_match latched, 0 until there is one. */
+uint32_t cpa_target_latched_pid(void);
+
 /* Publish the rules and tell the capture modules which map to share. */
 int cpa_target_prepare(void);
 

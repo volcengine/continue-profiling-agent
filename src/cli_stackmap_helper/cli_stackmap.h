@@ -123,6 +123,26 @@ int cli_stackmap_done_at(struct cli_stackmap *map, uint64_t count,
 			 uint64_t record_ms);
 
 /**
+ * cli_stackmap_done_intern - close the current frame list without a count.
+ * @map: target stackmap.
+ * @ids_id: the interned stack, to charge later with cli_stackmap_add_at().
+ *
+ * Return: 0 on success, negative on failure.
+ */
+int cli_stackmap_done_intern(struct cli_stackmap *map, uint32_t *ids_id);
+
+/**
+ * cli_stackmap_add_at - charge an interned stack at an explicit timestamp.
+ * @map: target stackmap.
+ * @ids_id: a stack from cli_stackmap_done_intern() on this map.
+ * @count: count to add.
+ * @record_ms: timestamp in milliseconds from the map day start.
+ *
+ * Return: 0 on success, negative on failure.
+ */
+int cli_stackmap_add_at(struct cli_stackmap *map, uint32_t ids_id, uint64_t count, uint64_t record_ms);
+
+/**
  * cli_stackmap_now_record_ms - return current milliseconds from map day start.
  * @map: target stackmap.
  *

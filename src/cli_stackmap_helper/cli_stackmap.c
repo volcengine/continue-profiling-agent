@@ -484,6 +484,44 @@ int cli_stackmap_done_at(struct cli_stackmap *map, uint64_t count, uint64_t reco
 	return 0;
 }
 
+/*
+ * Finish the current stack without counting it: the caller keeps @ids_id
+ * and charges it later with cli_stackmap_add_at() (weights that change
+ * after the sample, e.g. memory that is still resident).
+ */
+int cli_stackmap_done_intern(struct cli_stackmap *map, uint32_t *ids_id)
+{
+	int ret = cli_stackmap_intern_current_ids(map, ids_id);
+
+	if (map)
+		cli_stackmap_current_reset(map, 0);
+	return ret;
+}
+
+int cli_stackmap_add_at(struct cli_stackmap *map, uint32_t ids_id, uint64_t count, uint64_t record_ms)
+{
+	struct id_count *id_count = NULL;
+	int ret = 0;
+
+	if (!map)
+		return -1;
+	pthread_mutex_lock(&map->id_count_lock);
+	if (map->timewheel) {
+		ret = stackmap_timewheel_add(map->timewheel, record_ms, ids_id, count);
+		pthread_mutex_unlock(&map->id_count_lock);
+		return ret;
+	}
+	HASH_FIND_INT(map->id_count, &ids_id, id_count);
+	if (id_count) {
+		id_count->count += count;
+		pthread_mutex_unlock(&map->id_count_lock);
+		return 0;
+	}
+	pthread_mutex_unlock(&map->id_count_lock);
+	new_id_count(map, ids_id, count);
+	return 0;
+}
+
 int cli_stackmap_done(struct cli_stackmap *map, uint64_t count)
 {
 	struct id_count *id_count = NULL;

@@ -129,6 +129,12 @@ struct gu_statistics *cpa_get_gunwinder_stat(void);
  */
 void cpa_emit_kernel_only_sample(const struct stack_event *event, unsigned int sample_freq);
 
+/*
+ * Intern a stack of just @marker under @sample's process root, like a real
+ * sample would be; for charges without a captured stack.
+ */
+int cpa_unwind_intern_marker(const struct stack_sample *sample, const char *marker, uint32_t *ids_id);
+
 /**
  * cpa_unwinder_drain_pending - synchronously process all queued unwind samples
  *

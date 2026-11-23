@@ -29,6 +29,7 @@ struct cpa_monitor_mode {
 	bool oneshot;
 	bool offcpu;
 	bool kernel_stack;
+	bool pagefault;
 	bool probe_enabled;
 	bool comm_filter;
 };
@@ -46,6 +47,7 @@ static void cpa_mode_init(struct cpa_monitor_mode *mode, void *ctx)
 	mode->oneshot = atoi(get_arg_by_name(ctx, "oneshot")) != 0;
 	mode->offcpu = atoi(get_arg_by_name(ctx, "offcpu")) != 0;
 	mode->kernel_stack = atoi(get_arg_by_name(ctx, "kernel_stack")) != 0;
+	mode->pagefault = atoi(get_arg_by_name(ctx, "pagefault")) != 0;
 	mode->probe_enabled = !cli_arg_is_null_default(mode->probe_name);
 	mode->comm_filter = !cli_arg_is_null_default(mode->comm);
 	/* every process selection is done in BPF */
@@ -441,7 +443,8 @@ static int cpa_probe_bpf_runtime(const struct cpa_monitor_mode *mode, char *reas
 
 static bool cpa_perf_mode_uses_bpf_only_features(const struct cpa_monitor_mode *mode)
 {
-	return mode->oneshot || mode->offcpu || mode->probe_enabled || mode->kernel_stack || mode->pid > 0 || mode->comm_filter || mode->stack_size != 8192;
+	return mode->oneshot || mode->offcpu || mode->probe_enabled || mode->kernel_stack || mode->pagefault ||
+	       mode->pid > 0 || mode->comm_filter || mode->stack_size != 8192;
 }
 
 static bool cpa_bpf_mode_can_fallback_to_perf(const struct cpa_monitor_mode *mode)
@@ -451,6 +454,10 @@ static bool cpa_bpf_mode_can_fallback_to_perf(const struct cpa_monitor_mode *mod
 
 static int cpa_reject_perf_backend(const struct cpa_monitor_mode *mode)
 {
+	if (!strcmp(mode->backend, "perf") && mode->pagefault) {
+		CLI_ERROR("--pagefault requires backend=bpf");
+		return -EINVAL;
+	}
 	if (!strcmp(mode->backend, "perf") && cpa_perf_mode_uses_bpf_only_features(mode)) {
 		CLI_ERROR("perf backend only supports on-cpu continuous profiling; --oneshot, --offcpu, --probe, --kernel_stack, non-default --stack_size and every process selection (--pid, --comm, --thread_comm, --exe, --cgroup, --container_pid, --children, --new_only, --first_match, --startup_window) and exit capture (--enable_exit_capture, --exit_*) require bpf backend");
 		return -EINVAL;

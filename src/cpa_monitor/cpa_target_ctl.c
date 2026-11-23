@@ -728,6 +728,16 @@ static void adopt_latch(const char *comm)
 	wake_first_match();
 }
 
+uint32_t cpa_target_latched_pid(void)
+{
+	uint32_t pid;
+
+	pthread_mutex_lock(&tc.latch_lock);
+	pid = tc.latched ? tc.latch.target.tgid : 0;
+	pthread_mutex_unlock(&tc.latch_lock);
+	return pid;
+}
+
 /* Logs and preloading follow the BPF events; the map already holds the state. */
 static void target_event_cb(void *data, unsigned int size, void *user_ctx)
 {

@@ -16,6 +16,7 @@
 #include "cpa_target_ctl.h"
 #include "cpa_exit_env.h"
 #include "cpa_drop_policy.h"
+#include "cpa_pagefault.h"
 #include <stdlib.h>
 #include <errno.h>
 #include "stack_capture.h"
@@ -339,13 +340,29 @@ static void stack_capture_event_process(void *event, unsigned int size, void *us
 
 	if (!sample) {
 		CLI_ERROR("out of memory building a stack sample");
+		/* a sampled page still counts, without its stack */
+		if (cpa_pagefault_enabled() && (e->pf.flags & PF_META_VALID))
+			cpa_pagefault_on_lost(&e->pf, e->timestamp);
 		goto out;
+	}
+
+	/*
+	 * --pagefault: the event is a sampled page.  The faulting CPU would
+	 * only split resident memory by CPU; a page whose stack cannot be
+	 * queued is still charged, to "[stack dropped]".
+	 */
+	if (cpa_pagefault_enabled() && (e->pf.flags & PF_META_VALID)) {
+		sample->pf = e->pf;
+		sample->cpu = 0;
 	}
 
 	ret = cpa_add_stack_event(sample);
 
-	if (ret)
+	if (ret) {
+		if (sample->pf.flags & PF_META_VALID)
+			cpa_pagefault_on_lost(&sample->pf, sample->timestamp);
 		cpa_sample_free(sample);
+	}
 
 out:
 	if (kernel_only_entered)
@@ -681,6 +698,18 @@ static enum cpa_worker_init_result cpa_bpf_capture_init_fn(void *ctx, void *work
 	bpf_capture_config.pid = cpa_target_is_dynamic() ? 0 : cpa_target_spec()->legacy_pid;
 	if (cpa_bpf_exit_capture_configure(ctx))
 		return CPA_INIT_FAILED;
+	if (cpa_pagefault_configure(ctx))
+		return CPA_INIT_FAILED;
+	/* the page hooks replace the samplers: nothing else to combine with */
+	if (cpa_pagefault_enabled() &&
+	    (atoi(get_arg_by_name(ctx, "offcpu")) || atoi(get_arg_by_name(ctx, "oneshot")) ||
+	     !cli_arg_is_null_default(get_arg_by_name(ctx, "probe")) ||
+	     atoi(get_arg_by_name(ctx, "enable_coredump_capture")) || exit_capture ||
+	     !strcmp(get_arg_by_name(ctx, "datapath"), "ringbuf"))) {
+		CLI_ERROR("--pagefault cannot be combined with --offcpu, --oneshot, --probe, "
+			  "--enable_coredump_capture, --enable_exit_capture or --datapath=ringbuf");
+		return CPA_INIT_FAILED;
+	}
 
 	bpf_exec_counter = cli_counter_init("bpf_exec_time", CLI_COUNTER_TYPE_TIME_NS);
 	if (!bpf_exec_counter)

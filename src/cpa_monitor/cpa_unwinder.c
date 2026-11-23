@@ -16,6 +16,7 @@
 #include "cpa_unwind_state.h"
 #include "cpa_unwind_queue.h"
 #include "cpa_frames.h"
+#include "cpa_pagefault.h"
 #include "uthash.h"
 
 #include <gunwinder/unwinder.h>
@@ -964,6 +965,40 @@ void cpa_emit_kernel_only_sample(const struct stack_event *event, unsigned int s
 	cpa_free_env_string(env_name);
 }
 
+/*
+ * Two frames, the process root of @sample and @marker, built straight in
+ * the map's current entry and interned within one hold of its lock, so no
+ * worker sees the entry half built.
+ */
+int cpa_unwind_intern_marker(const struct stack_sample *sample, const char *marker, uint32_t *ids_id)
+{
+	char base_info[CPA_BASE_INFO_LEN];
+	struct cli_stackmap *trace_stackmap;
+	char **record_env_name;
+	int record_env_name_count = 0;
+	char *env_name = NULL;
+	int ret;
+
+	record_env_name = cpa_get_record_env(&record_env_name_count);
+	if (record_env_name)
+		env_name = get_env_var_by_pid(sample->tgid, record_env_name, record_env_name_count);
+	if (!env_name)
+		env_name = default_env_name;
+	generate_metadata(base_info, CPA_BASE_INFO_LEN, (char *)sample->comm, (char *)sample->group_comm, sample->cgid,
+			  sample->cpu, sample->pid, env_name);
+	cpa_free_env_string(env_name);
+
+	trace_stackmap = cpa_main_tracemap_get_and_lock();
+	cli_stackmap_current_reset(trace_stackmap, 0);
+	cli_stackmap_append(trace_stackmap, base_info);
+	cli_stackmap_entry_reverse_ids(trace_stackmap);
+	cli_stackmap_append(trace_stackmap, marker);
+	cli_stackmap_entry_reverse_ids(trace_stackmap);
+	ret = cli_stackmap_done_intern(trace_stackmap, ids_id);
+	cpa_main_tracemap_unlock();
+	return ret;
+}
+
 /* Append and close the marker frames of a sample, as one reversed group. */
 static void cpa_frames_marker(struct cpa_frames *frames, const char *marker)
 {
@@ -1101,6 +1136,28 @@ static void cpa_unwind(struct unwind_worker *w, struct stack_sample *sample)
 			cpa_frames_append(frames, stop_reason_str[backtrace_ret]);
 
 		cpa_frames_reverse(frames);
+	}
+
+	/*
+	 * A sampled page is charged while it stays resident, so it is interned
+	 * without a count and handed to the pagefault tracker.  The kernel
+	 * part would only be the fault path.
+	 */
+	if (sample->pf.flags & PF_META_VALID) {
+		uint32_t ids_id = 0;
+		int ret;
+
+		trace_stackmap = cpa_main_tracemap_get_and_lock();
+		cpa_frames_commit(frames, trace_stackmap);
+		ret = cli_stackmap_done_intern(trace_stackmap, &ids_id);
+		cpa_main_tracemap_unlock();
+		/* after the unlock: the tracker takes the tracemap lock inside its own */
+		if (ret == 0)
+			cpa_pagefault_on_alloc(sample, ids_id);
+		else	/* the page still counts, without its stack */
+			cpa_pagefault_on_lost(&sample->pf, sample->timestamp);
+		cpa_free_env_string(env_name);
+		return;
 	}
 
 	if (!sample->user_mode && sample->kstack_fp_level == 0)

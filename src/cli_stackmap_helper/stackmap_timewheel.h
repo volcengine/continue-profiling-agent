@@ -9,6 +9,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* One bucket per second of record time. */
+#define STACKMAP_TIMEWHEEL_BUCKET_MS 1000ULL
+
 struct stackmap_timewheel;
 
 struct stackmap_timewheel_stats {
