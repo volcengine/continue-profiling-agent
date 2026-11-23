@@ -170,6 +170,38 @@ sudo ./build/bin/cpa monitor --container_pid 4242
 TUI 支持时间窗口浏览、火焰图缩放和交互式过滤。详细说明见
 [src/cpa_show/doc/cpa_show.md](../../src/cpa_show/doc/cpa_show.md)。
 
+## `cpa capabilities`
+
+打印当前内核允许 `cpa monitor` 做什么，每行一个 `key: value`。每项能力都是实际
+加载一个小 BPF 程序或 map 探测出来的，不靠内核版本号推断，所以回合的补丁也算数：
+
+```bash
+sudo ./build/bin/cpa capabilities
+```
+
+```text
+schema_version: 1
+kernel.release: 5.15.152-amd64
+capability.get_stack_perf_event.state: supported
+capability.get_stack_perf_event.reason: probe_succeeded
+capability.get_stack_perf_event.error_code: 0
+...
+```
+
+state 取值：`supported`、`unsupported`（内核没有）、`unavailable`（没有权限，
+请用 root 运行）、`probe_error`（errno 见 `error_code`）。各项能力：
+
+- `get_stack_perf_event`、`get_stack_kprobe`、`get_stack_tracepoint`：三种程序
+  类型下的 `bpf_get_stack`；三者不全时使用 lite 采集对象（见内核兼容性说明）；
+- `perf_event_program_load`、`kprobe_program_load`、`tracepoint_program_load`：
+  定时采样、`--offcpu` / `--probe kprobe:...`、`--probe tracepoint:...` 加载的程序类型；
+- `process_exit`：每次运行都会挂的进程退出 tracepoint 程序；
+- `coredump`：`--enable_coredump_capture` 用的 `do_coredump` kprobe；
+- `ringbuf`：ring buffer 数据通路（`--datapath auto` 在有时使用）。
+
+`cpa monitor` 选择 BPF 对象时读的就是这份缓存结果。只有某个 key 的含义改变时
+`schema_version` 才会变。
+
 ## 输出与存储说明
 
 - 默认持续存储目录根是 `/var/log/cpa`

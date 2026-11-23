@@ -71,3 +71,5 @@ For distribution kernels, do not rely only on `uname -r`. Vendors often
 backport BPF and mm fixes without changing the upstream major/minor version.
 Check the vendor kernel changelog for the upstream fix commit before enabling
 CPA.
+`cpa capabilities` shows which BPF features the running kernel actually
+offers (see the usage guide).

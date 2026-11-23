@@ -27,10 +27,11 @@ for the issue to reproduce.
 
 ## Commands
 
-CPA has two primary commands:
+CPA has these commands:
 
 - `cpa monitor`: collect and persist profile data
 - `cpa show`: inspect stored data as a flamegraph or in the embedded Rust TUI
+- `cpa capabilities`: show which BPF features the running kernel offers
 
 ## What CPA Contains
 

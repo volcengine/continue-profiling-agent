@@ -44,6 +44,10 @@ The default suite currently includes:
 - `tests/cpa/test_offcpu_probe.py`
   - `offcpu` and `probe` in normal and one-shot modes
   - OFFCPU thread/process metadata contract
+- `tests/cpa/test_capabilities.py`
+  - compiles a unit test of the capability model (`bpf/src/common/capabilities.c`):
+    probed once, each probe result kept with its reason
+  - `cpa capabilities` prints every capability with a valid state
 - `tests/cpa/test_target_parse.py`
   - compiles a unit test of `src/cpa_monitor/cpa_target.c`: which option
     combinations select through the target set, which keep the pid/thread

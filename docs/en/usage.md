@@ -187,6 +187,42 @@ The TUI supports time-range browsing, flamegraph zoom, and interactive filters.
 Detailed TUI behavior is documented in
 [src/cpa_show/doc/cpa_show.en.md](../../src/cpa_show/doc/cpa_show.en.md).
 
+## `cpa capabilities`
+
+Prints what the running kernel lets `cpa monitor` do, one `key: value` per
+line. Each capability is probed by loading a small BPF program or map, not
+guessed from the kernel version, so backports count:
+
+```bash
+sudo ./build/bin/cpa capabilities
+```
+
+```text
+schema_version: 1
+kernel.release: 5.15.152-amd64
+capability.get_stack_perf_event.state: supported
+capability.get_stack_perf_event.reason: probe_succeeded
+capability.get_stack_perf_event.error_code: 0
+...
+```
+
+A state is `supported`, `unsupported` (the kernel lacks it), `unavailable`
+(no permission: run as root) or `probe_error` (with the errno in
+`error_code`). The capabilities are:
+
+- `get_stack_perf_event`, `get_stack_kprobe`, `get_stack_tracepoint`:
+  `bpf_get_stack` for each program type; without all three the lite capture
+  objects are used (see the kernel compatibility notes);
+- `perf_event_program_load`, `kprobe_program_load`,
+  `tracepoint_program_load`: the program types timer sampling, `--offcpu` /
+  `--probe kprobe:...` and `--probe tracepoint:...` load;
+- `process_exit`: the exit tracepoint program every run attaches;
+- `coredump`: the `do_coredump` kprobe of `--enable_coredump_capture`;
+- `ringbuf`: the ring-buffer datapath (`--datapath auto` uses it when present).
+
+`cpa monitor` reads the same cached results when it picks its BPF objects.
+`schema_version` changes only when a key changes meaning.
+
 ## Output and Storage Notes
 
 - The default continuous store root is `/var/log/cpa`.

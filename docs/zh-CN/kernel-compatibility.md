@@ -66,3 +66,4 @@ ring buffer 数据通路。已在 4.14.81（x86_64）上验证 on-CPU、off-CPU 
 对于发行版内核，不要只看 `uname -r`。vendor 经常在不改变 upstream
 major/minor 版本的情况下回合 BPF 和 mm 修复。启用 CPA 前，请检查 vendor 内核
 changelog，确认 upstream fix commit 已包含。
+`cpa capabilities` 可以查看当前内核实际提供了哪些 BPF 能力（见使用手册）。

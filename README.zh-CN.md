@@ -23,10 +23,11 @@
 
 ## 命令
 
-CPA 提供两条主要命令：
+CPA 提供以下命令：
 
 - `cpa monitor`：采集并持久化 profile 数据
 - `cpa show`：读取存储数据，导出 flamegraph 或进入内嵌 Rust TUI
+- `cpa capabilities`：查看当前内核提供哪些 BPF 能力
 
 ## 当前能力范围
 

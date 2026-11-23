@@ -58,6 +58,7 @@ set(CPA_EXTRA_COMMON_SOURCES
 set(CPA_MODULE_DIRS
     cpa_monitor
     cpa_show
+    cpa_capabilities
 )
 
 set(CPA_MONITOR_SOURCES
@@ -113,6 +114,7 @@ list(APPEND CPA_INCLUDE_DIRS "${CPA_SRC_DIR}/cli_profile_cui_helper")
 
 list(APPEND CPA_SOURCES ${CPA_MONITOR_SOURCES})
 list(APPEND CPA_SOURCES "${CPA_SRC_DIR}/cpa_show/cpa_show.c")
+list(APPEND CPA_SOURCES "${CPA_SRC_DIR}/cpa_capabilities/cpa_capabilities.c")
 list(APPEND CPA_INCLUDE_DIRS "${CPA_SRC_DIR}/cpa_monitor")
 list(APPEND CPA_INCLUDE_DIRS "${CPA_SRC_DIR}/cpa_show")
 

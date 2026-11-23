@@ -42,6 +42,10 @@ pytest -q tests/cpa
 - `tests/cpa/test_offcpu_probe.py`
   - `offcpu` 与 `probe` 的 normal / oneshot 行为
   - `offcpu` 的线程/进程元数据约定
+- `tests/cpa/test_capabilities.py`
+  - 编译能力模型（`bpf/src/common/capabilities.c`）的单元测试：只探测一次，
+    每个探测结果连同原因一起保存
+  - `cpa capabilities` 打印每一项能力，state 合法
 - `tests/cpa/test_target_parse.py`
   - 编译 `src/cpa_monitor/cpa_target.c` 的单元测试：哪些选项组合走目标集合，
     哪些保留 pid/线程名过滤，哪些被拒绝
