@@ -48,6 +48,32 @@ The default suite currently includes:
   - compiles a unit test of the capability model (`bpf/src/common/capabilities.c`):
     probed once, each probe result kept with its reason
   - `cpa capabilities` prints every capability with a valid state
+- `tests/cpa/test_unwind_queue.py`
+  - compiles a unit test of the unwind queue lanes and the per-sample frame
+    buffer, plain, with ASan/UBSan and with TSan: routing by process, the
+    shared admission budget and exit capacity, an exit waiting for the
+    samples of its instance, wake-ups (a lane's own, all on stop, the first
+    exit of a lane) and the frame buffer mirroring a stack map entry
+- `tests/cpa/test_unwind_workers_e2e.py`
+  - bad `--unwind_workers` values are refused before any worker starts;
+    with 1 and 4 workers every sampled process gets user frames
+- `tests/cpa/tools/cpa_unwind_workers.sh`
+  - a `TEST_CPA_PATH` wrapper adding `--unwind_workers=4` (or
+    `$CPA_UNWIND_WORKERS`) to every monitor run, to run the whole suite
+    with several workers. `test_cpa_multi_workload_hot_stacks_and_cpu_budget`
+    keeps its one-worker budget (0.5 cores over a 30 s run) and is expected
+    to exceed it there: each worker's context loads the debug information of
+    the shared libraries again at startup (on a 56-core host, about 0.7 cores
+    over the run with 4 workers; steady state 5% of a core against 2.5%)
+- `tests/cpa/tools/build_sanitized.sh tsan|asan OUT` and
+  `tests/cpa/tools/stress.sh CPA_BIN WORKERS SECONDS OUTDIR [monitor args]`
+  - build cpa and libgunwinder with TSan or ASan
+    (`-DCPA_BPF_ENABLE_TSAN=ON` / `-DCPA_BPF_ENABLE_ASAN=ON`; libgunwinder is
+    rebuilt from a copy, since its in-tree build ignores flag changes), then
+    sample the whole system under a fork storm and busy processes; the run
+    passes with 0 sanitizer reports. `MIDNIGHT_IN=S` (libfaketime, ASan
+    builds only: libfaketime breaks TSan's clock) crosses midnight after S
+    seconds, so every worker is paused and restored once
 - `tests/cpa/test_target_parse.py`
   - compiles a unit test of `src/cpa_monitor/cpa_target.c`: which option
     combinations select through the target set, which keep the pid/thread

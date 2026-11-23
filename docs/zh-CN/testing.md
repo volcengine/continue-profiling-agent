@@ -46,6 +46,28 @@ pytest -q tests/cpa
   - 编译能力模型（`bpf/src/common/capabilities.c`）的单元测试：只探测一次，
     每个探测结果连同原因一起保存
   - `cpa capabilities` 打印每一项能力，state 合法
+- `tests/cpa/test_unwind_queue.py`
+  - 编译回溯队列 lane 与单样本帧缓冲的单元测试，分别以普通、ASan/UBSan、TSan
+    方式运行：按进程路由、共享的准入额度与 exit 容量、exit 等待同一实例的样本、
+    唤醒（只唤醒本 lane、停止时全部唤醒、lane 上第一个 exit 唤醒）、帧缓冲与
+    stack map 条目语义一致
+- `tests/cpa/test_unwind_workers_e2e.py`
+  - 非法的 `--unwind_workers` 在任何线程启动前被拒绝；1 个和 4 个线程时，
+    每个被采样进程都有用户态帧
+- `tests/cpa/tools/cpa_unwind_workers.sh`
+  - `TEST_CPA_PATH` 包装脚本，给每条 monitor 命令加 `--unwind_workers=4`
+    （或 `$CPA_UNWIND_WORKERS`），用于以多线程跑整套测试。
+    `test_cpa_multi_workload_hot_stacks_and_cpu_budget` 的预算（30 秒内平均 0.5 核）
+    按单线程定，在包装脚本下预期超出：每个线程的 context 启动时都要重新加载公共库的
+    调试信息（56 核机器上 4 线程整段约 0.7 核；稳态 5% 核，单线程 2.5%）
+- `tests/cpa/tools/build_sanitized.sh tsan|asan OUT` 与
+  `tests/cpa/tools/stress.sh CPA_BIN WORKERS SECONDS OUTDIR [monitor 参数]`
+  - 以 TSan 或 ASan 构建 cpa 与 libgunwinder（`-DCPA_BPF_ENABLE_TSAN=ON` /
+    `-DCPA_BPF_ENABLE_ASAN=ON`；libgunwinder 在源码目录内构建、改编译选项不会重编，
+    所以从一份拷贝重新构建），再在 fork 风暴和繁忙进程下全系统采样；sanitizer
+    报告数为 0 才算通过。`MIDNIGHT_IN=S`（需要 libfaketime，只能用于 ASan 构建：
+    libfaketime 会破坏 TSan 的时钟拦截）让时钟在 S 秒后跨过零点，所有回溯线程
+    暂停并恢复一次
 - `tests/cpa/test_target_parse.py`
   - 编译 `src/cpa_monitor/cpa_target.c` 的单元测试：哪些选项组合走目标集合，
     哪些保留 pid/线程名过滤，哪些被拒绝

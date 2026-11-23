@@ -49,7 +49,7 @@ kernel 事件 / perf sample
 ## Runtime 层
 
 `cpa monitor` 使用基于 worker 的 runtime。每个 worker 可以实现
-`init`、`timer`、`main_worker`、`pause`、`restore`、`destroy` 等生命周期钩子。
+`init`、`timer`、`main_worker`、`pause`、`restore`、`stop`、`destroy` 等生命周期钩子。
 
 worker 集覆盖：
 
@@ -66,6 +66,28 @@ worker 集覆盖：
 runtime 统一持有共享 `cli_stackmap`，负责 worker 启动顺序、周期回调，以及在缓存或存储超限时执行 restart 流程。
 
 worker 细节可参考 [src/cpa_monitor/README.md](../../src/cpa_monitor/README.md)。
+
+### 回溯线程
+
+用户栈由 `--unwind_workers` 个线程回溯（默认 1）。0 号就是主线程的 runtime 循环，
+其余在 init 时创建。回溯队列每个线程一条 lane，进程（tgid）按哈希固定属于一条
+lane：它的样本和 exit 都进这条 lane。每个线程有自己的 libgunwinder context，所以
+一个进程的回溯状态只有一个写者，回溯过程不取共享锁，只在把整条栈提交到共享
+stack map 时短暂持锁一次。内核符号只由 0 号 context 加载一次，所有线程都通过它查。
+
+准入是所有 lane 共用一个额度：排队加正在回溯的样本不超过
+`max_queue_size - 1 + 线程数`，单个繁忙进程能占满自己的 lane，和单线程时一样。
+进程 exit 由所属 lane 的线程在 10 秒宽限期之后回收，并且要等这个进程实例的样本
+都回溯完。空闲线程睡在自己 lane 的信号量上；样本、lane 上的第一个 exit、暂停或
+停止会唤醒它。
+
+重启（跨天、缓存或存储超限）时先让所有线程停在安全点，再重建 context；停止时
+先 join 其余线程，存储线程才做最后一次落盘。
+
+代价：每个 context 各自保存它的进程所映射的库的调试信息，内存和启动时加载它的 CPU
+都随线程数增长；
+单个进程不会因为多线程而回溯得更快。除非队列长期积压（`Parse Queue Len` 接近上限、
+出现 `PRESSURE DROP` 样本），保持默认即可。
 
 ## 采集后端
 

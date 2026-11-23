@@ -266,6 +266,7 @@ taskset -c 0 libs/libgunwinder/bin/cfi_bench \
 - `--record_env_name, -R <LIST>`：把这些环境变量键写入 metadata，供 `cpa show` 后续过滤。
 - `--parse_env_values, -V <LIST>`：只对环境变量值匹配该列表的进程做用户态展开。
 - `--max_queue_size, -m <N>`：内存中 stack event 队列的上限。
+- `--unwind_workers <N>`：回溯用户栈的线程数，1 到在线 CPU 数（最多 64），默认 1。每个进程只由其中一个线程回溯；内存随 N 增长（见 docs/zh-CN/architecture.md）。
 - `--stack_size <BYTES>`：BPF 后端用户态栈抓取缓冲大小，必须 4K 对齐，范围 `[4096, 65536]`。perf 后端不支持自定义这一语义。
 - `--max_cache_size_mb <MB>`：符号和调试缓存超过该限制时重启 monitor。
 - `--max_store_size_mb <MB>`：store 目录超过该限制时重启 monitor，并清理旧目录。

@@ -53,7 +53,8 @@ def test_cpa_monitor_bench_reports_dwarf_unwind_stats(tmp_path):
             "monitor",
             "--backend=perf",
             "--freq=49",
-            "--duration=2",
+            # startup takes most of 2 s on 4.14: leave room for a report
+            "--duration=4",
             "--store_dir",
             str(tmp_path),
             "--bench",

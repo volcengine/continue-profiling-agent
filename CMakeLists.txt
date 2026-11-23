@@ -16,6 +16,15 @@ set(CPA_BPF_LLVM_VERSION "15" CACHE STRING "")
 set(CPA_BPF_VERSION "1.1.1" CACHE STRING "")
 
 option(CPA_BPF_ENABLE_ASAN "enable asan" OFF)
+option(CPA_BPF_ENABLE_TSAN "enable tsan (for --unwind_workers stress runs)" OFF)
+if(CPA_BPF_ENABLE_ASAN AND CPA_BPF_ENABLE_TSAN)
+    message(FATAL_ERROR "CPA_BPF_ENABLE_ASAN and CPA_BPF_ENABLE_TSAN cannot be combined")
+endif()
+if(CPA_BPF_ENABLE_ASAN)
+    set(CPA_BPF_SANITIZER "address")
+elseif(CPA_BPF_ENABLE_TSAN)
+    set(CPA_BPF_SANITIZER "thread")
+endif()
 option(CPA_BPF_QUIET_BUILD "suppress sub-build stdout (show warnings/errors only)" ON)
 set(CPA_BPF_BTFHUB_ARCHIVE "${CMAKE_SOURCE_DIR}/bpf/btfhub-archive" CACHE PATH "")
 
@@ -99,8 +108,8 @@ target_include_directories(cpa_bpf_core PRIVATE
     "${CPA_BPF_GEN_DIR}"
 )
 
-if(CPA_BPF_ENABLE_ASAN)
-    target_compile_options(cpa_bpf_core PRIVATE -fsanitize=address)
+if(CPA_BPF_SANITIZER)
+    target_compile_options(cpa_bpf_core PRIVATE -fsanitize=${CPA_BPF_SANITIZER})
 endif()
 
 cpa_bpf_define_deps()

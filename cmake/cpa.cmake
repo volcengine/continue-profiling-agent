@@ -156,8 +156,8 @@ file(GLOB_RECURSE CPA_GUNWINDER_SOURCES
 list(APPEND CPA_GUNWINDER_SOURCES "${CPA_GUNWINDER_PATH}/Makefile")
 
 set(CPA_GUNWINDER_DEBUG_FLAGS "-g")
-if(CPA_BPF_ENABLE_ASAN)
-    set(CPA_GUNWINDER_DEBUG_FLAGS "-g -fsanitize=address")
+if(CPA_BPF_SANITIZER)
+    set(CPA_GUNWINDER_DEBUG_FLAGS "-g -fsanitize=${CPA_BPF_SANITIZER}")
 endif()
 
 cpa_bpf_wrap_quiet_command(
@@ -241,15 +241,15 @@ target_compile_definitions(cpa PRIVATE
     __CPA_BPF_ARCH_${CPA_BPF_ARCH}
 )
 
-if(CPA_BPF_ENABLE_ASAN)
-    target_compile_options(cpa PRIVATE -fsanitize=address)
+if(CPA_BPF_SANITIZER)
+    target_compile_options(cpa PRIVATE -fsanitize=${CPA_BPF_SANITIZER})
     if(COMMAND target_link_options)
-        target_link_options(cpa PRIVATE -fsanitize=address)
+        target_link_options(cpa PRIVATE -fsanitize=${CPA_BPF_SANITIZER})
     else()
         set_property(
             TARGET cpa
             APPEND_STRING
-            PROPERTY LINK_FLAGS " -fsanitize=address"
+            PROPERTY LINK_FLAGS " -fsanitize=${CPA_BPF_SANITIZER}"
         )
     endif()
 endif()

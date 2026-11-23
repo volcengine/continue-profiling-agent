@@ -51,7 +51,7 @@ The user-facing subcommands are:
 ## Runtime Layer
 
 `cpa monitor` uses a worker-based runtime. Workers provide lifecycle hooks such
-as `init`, `timer`, `main_worker`, `pause`, `restore`, and `destroy`.
+as `init`, `timer`, `main_worker`, `pause`, `restore`, `stop`, and `destroy`.
 
 The worker set covers:
 
@@ -71,6 +71,36 @@ limits require a rebuild.
 
 See [src/cpa_monitor/README.md](../../src/cpa_monitor/README.md) for the worker
 breakdown.
+
+### Unwind workers
+
+User stacks are unwound by `--unwind_workers` threads (default 1). Worker 0
+is the main thread's runtime loop; the others are threads started at init.
+The unwind queue has one lane per worker, and a process (tgid) is hashed to
+one lane for the whole session: its samples and its exit both go there. Each
+worker has its own libgunwinder context, so a process' unwind state has one
+writer and the unwind path takes no shared lock until the finished frames are
+committed to the shared stack map in one short critical section. Kernel
+symbols are loaded once, by context 0, and looked up through it by all
+workers.
+
+Admission is one budget for all lanes: queued plus in-flight samples stay
+within `max_queue_size - 1 + workers`, and one busy process can fill its lane
+as with one worker. An exit is reaped by its lane's worker after a 10 s grace
+period and only once no sample of that process instance is still queued or
+being unwound. Idle workers sleep on their lane's semaphore; a sample, the
+first exit of a lane, a pause or a stop wakes them.
+
+A restart (day rotation, cache or store limits) pauses all workers at a safe
+point before the contexts are rebuilt; stop joins the extra workers before
+the store worker flushes.
+
+The trade-off: every context keeps its own copy of the debug information of
+the libraries its processes map, so memory and the startup CPU spent loading
+it grow with the worker count, and
+a single process is never unwound faster than by one worker. Keep the
+default unless the queue stays backed up (`Parse Queue Len` near the limit,
+`PRESSURE DROP` samples).
 
 ## Capture Backends
 
