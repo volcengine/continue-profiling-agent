@@ -274,6 +274,8 @@ static struct stack_sample *stack_sample_build(struct stack_event *e, const char
 	 * libgunwinder resolves the blocked thread's stack snapshot correctly.
 	 */
 	stack->pid = e->pid;
+	/* read a process whose leader already exited through this thread */
+	stack->tid = e->tid;
 	stack->unique_id = e->unique_id;
 	stack->regs_size = PT_REGS_SIZE;
 	stack->stack_data = (uint8_t *)(stack + 1);

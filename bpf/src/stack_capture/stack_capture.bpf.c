@@ -362,6 +362,7 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 		struct task_struct *cur = (struct task_struct *)bpf_get_current_task();
 
 		event->pid = pid;
+		event->tid = tid;
 		event->cgid = task_cgroup_id(cur);
 		event->cpu = bpf_get_smp_processor_id();
 		event->timestamp = time;
@@ -418,6 +419,7 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 	struct task_struct *cur = (struct task_struct *)bpf_get_current_task();
 
 	event->pid = pid;
+	event->tid = tid;
 	event->ustack_fp_size = 0;
 	event->kstack_sz = 0;
 	event->user_mode = 0;

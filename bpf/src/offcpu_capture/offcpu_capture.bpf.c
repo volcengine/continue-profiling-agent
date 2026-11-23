@@ -177,6 +177,7 @@ static __always_inline int oncpu(void *ctx, struct task_struct *prev, struct tas
 	 * blocking threads in the same task group.
 	 */
 	event->pid = pid;
+	event->tid = pid;
 	event->cgid = tgid;
 	event->cpu = cpu;
 	event->diff_ns = delta;

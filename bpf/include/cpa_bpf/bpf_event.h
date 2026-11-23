@@ -63,16 +63,17 @@ enum stack_event_type {
 
 /**
  * struct stack_event - stack capture event payload emitted by BPF
- * @pid: sampler-specific task identifier slot
- *       stack_capture stores TGID here. offcpu_capture stores the blocked
- *       thread TID because the register snapshot is thread-scoped.
- * @cgid: secondary metadata slot
- *        stack_capture stores cgroup id here. offcpu_capture stores TGID
- *        here so the userspace path still has both thread and process
- *        identity until the payload grows an explicit tid field.
+ * @pid: stack_capture stores the process (TGID) here; offcpu_capture stores
+ *       the blocked thread (TID), whose register snapshot it is.
+ * @tid: the sampled thread, from every producer.  /proc of a process whose
+ *       leader exited has no mappings left, its other threads' have.
+ * @cgid: stack_capture stores the cgroup id here; offcpu_capture stores the
+ *        process (TGID).  The sample builder is the one place that reads it
+ *        as either.
  */
 struct stack_event {
 	unsigned int pid;
+	unsigned int tid;
 	unsigned long cgid;
 	unsigned long timestamp;
 	unsigned int type;
