@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 ByteDance
 
+mod coredump;
 mod ui;
 
 use crate::profile::UiProfile;

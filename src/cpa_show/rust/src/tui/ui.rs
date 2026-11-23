@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 ByteDance
 
+use super::coredump::{
+    addr2line_tool, find_cgroup_root_by_id, resolve_native_frame_with_tool, scan_coredump_samples,
+    ContainerRoot, CoreDumpSample, LineResolution, LineResolutionStatus, SampleKind,
+    CPA_ADDR2LINE_ENV,
+};
 use crate::cpa::{parse_cpu_set, Filter, FilterSet, FilterTarget, FilterValue};
 use crate::profile::{ProfileData, UiProfile};
 use anyhow::Context;
@@ -23,6 +28,8 @@ use std::{
     collections::{HashMap, VecDeque},
     hash::{Hash, Hasher},
     io,
+    sync::mpsc::{self, Receiver},
+    thread,
     time::{Duration, Instant},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -88,12 +95,64 @@ enum PromptKind {
     Command,
     GotoTime,
     SetRange,
+    CoreContainerPid,
 }
 
 #[derive(Debug, Clone)]
 struct Prompt {
     kind: PromptKind,
     input: CmdInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoreDumpView {
+    List,
+    Detail,
+}
+
+struct CoreDumpPanel {
+    samples: Vec<CoreDumpSample>,
+    selected: usize,
+    list_scroll: usize,
+    detail_scroll: usize,
+    detail_hscroll: usize,
+    detail_page_step: usize,
+    view: CoreDumpView,
+    explicit_container_pid: Option<u32>,
+    explicit_container_root: Option<ContainerRoot>,
+    resolve_rx: Option<Receiver<CoreDumpResolveMsg>>,
+    resolving_sample: Option<usize>,
+    resolutions: HashMap<(usize, usize), LineResolution>,
+}
+
+impl CoreDumpPanel {
+    fn new(samples: Vec<CoreDumpSample>) -> Self {
+        Self {
+            samples,
+            selected: 0,
+            list_scroll: 0,
+            detail_scroll: 0,
+            detail_hscroll: 0,
+            detail_page_step: 10,
+            view: CoreDumpView::List,
+            explicit_container_pid: None,
+            explicit_container_root: None,
+            resolve_rx: None,
+            resolving_sample: None,
+            resolutions: HashMap::new(),
+        }
+    }
+}
+
+enum CoreDumpResolveMsg {
+    Frame {
+        sample_index: usize,
+        frame_index: usize,
+        resolution: LineResolution,
+    },
+    Done {
+        sample_index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +247,8 @@ struct App {
     show_conf: bool,
     show_help: bool,
     show_filters: bool,
+    // [L]: coredump and non-zero exit samples
+    coredump_panel: Option<CoreDumpPanel>,
     status: VecDeque<String>,
     last_render_us: u128,
 
@@ -237,6 +298,7 @@ impl App {
             show_conf: false,
             show_help: false,
             show_filters: false,
+            coredump_panel: None,
             status: VecDeque::new(),
             last_render_us: 0,
             dirty: true,
@@ -403,6 +465,9 @@ impl App {
                             PromptKind::Command => self.apply_command(&line),
                             PromptKind::GotoTime => self.apply_goto_time(&line),
                             PromptKind::SetRange => self.apply_set_range(&line),
+                            PromptKind::CoreContainerPid => {
+                                self.apply_coredump_container_pid(&line)
+                            }
                         };
                         if let Err(e) = r {
                             self.push_status(format!("Input error: {e}"));
@@ -424,7 +489,12 @@ impl App {
             return;
         }
 
+        if self.handle_coredump_key(k) {
+            return;
+        }
+
         match k.code {
+            KeyCode::Char('L') => self.open_coredump_panel(),
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 // handled by caller via return flag
             }
@@ -566,6 +636,232 @@ impl App {
             KeyCode::Esc => self.zoom_out(),
             _ => {}
         }
+    }
+
+    fn tick_coredump_resolver(&mut self) {
+        let mut changed = false;
+        if let Some(panel) = &mut self.coredump_panel {
+            let mut done = false;
+            if let Some(rx) = &panel.resolve_rx {
+                loop {
+                    match rx.try_recv() {
+                        Ok(CoreDumpResolveMsg::Frame {
+                            sample_index,
+                            frame_index,
+                            resolution,
+                        }) => {
+                            panel
+                                .resolutions
+                                .insert((sample_index, frame_index), resolution);
+                            changed = true;
+                        }
+                        Ok(CoreDumpResolveMsg::Done { sample_index }) => {
+                            if panel.resolving_sample == Some(sample_index) {
+                                done = true;
+                            }
+                            changed = true;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            done = true;
+                            changed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if done {
+                panel.resolve_rx = None;
+                panel.resolving_sample = None;
+            }
+        }
+        if changed {
+            self.mark_dirty();
+        }
+    }
+
+    fn open_coredump_panel(&mut self) {
+        let samples = scan_coredump_samples(&*self.profile.data);
+        let count = samples.len();
+        let exits = samples
+            .iter()
+            .filter(|s| s.marker.kind == SampleKind::Exit)
+            .count();
+        self.coredump_panel = Some(CoreDumpPanel::new(samples));
+        self.push_status(format!(
+            "CoreDump samples: {}  non-zero exit samples: {exits}",
+            count - exits
+        ));
+    }
+
+    fn handle_coredump_key(&mut self, k: KeyEvent) -> bool {
+        let Some(panel) = &mut self.coredump_panel else {
+            return false;
+        };
+
+        let mut close = false;
+        let mut start_resolve = false;
+        let mut open_pid_prompt = false;
+
+        match panel.view {
+            CoreDumpView::List => match k.code {
+                KeyCode::Esc => close = true,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    panel.selected = panel.selected.saturating_sub(1);
+                    self.mark_dirty();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if !panel.samples.is_empty() {
+                        panel.selected = (panel.selected + 1).min(panel.samples.len() - 1);
+                    }
+                    self.mark_dirty();
+                }
+                KeyCode::Enter => {
+                    if !panel.samples.is_empty() {
+                        panel.view = CoreDumpView::Detail;
+                        panel.detail_scroll = 0;
+                        panel.detail_hscroll = 0;
+                        start_resolve = true;
+                        self.mark_dirty();
+                    }
+                }
+                _ => {}
+            },
+            CoreDumpView::Detail => match k.code {
+                KeyCode::Esc | KeyCode::Char('a') | KeyCode::Backspace => {
+                    panel.view = CoreDumpView::List;
+                    self.mark_dirty();
+                }
+                KeyCode::Char('f') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    panel.detail_scroll = panel
+                        .detail_scroll
+                        .saturating_add(panel.detail_page_step.max(1));
+                    self.mark_dirty();
+                }
+                KeyCode::Char('b') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    panel.detail_scroll = panel
+                        .detail_scroll
+                        .saturating_sub(panel.detail_page_step.max(1));
+                    self.mark_dirty();
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    panel.detail_hscroll = panel.detail_hscroll.saturating_sub(8);
+                    self.mark_dirty();
+                }
+                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('d') => {
+                    panel.detail_hscroll = panel.detail_hscroll.saturating_add(8);
+                    self.mark_dirty();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    panel.detail_scroll = panel.detail_scroll.saturating_sub(1);
+                    self.mark_dirty();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    panel.detail_scroll = panel.detail_scroll.saturating_add(1);
+                    self.mark_dirty();
+                }
+                KeyCode::Char('r') => {
+                    start_resolve = true;
+                    self.mark_dirty();
+                }
+                KeyCode::Char('p') => {
+                    open_pid_prompt = true;
+                }
+                _ => {}
+            },
+        }
+
+        if close {
+            self.coredump_panel = None;
+            self.mark_dirty();
+        } else if open_pid_prompt {
+            self.prompt = Some(Prompt {
+                kind: PromptKind::CoreContainerPid,
+                input: CmdInput::new(),
+            });
+            self.mark_dirty();
+        } else if start_resolve {
+            self.start_coredump_resolution_for_selected();
+        }
+
+        true
+    }
+
+    fn start_coredump_resolution_for_selected(&mut self) {
+        let Some(panel) = &mut self.coredump_panel else {
+            return;
+        };
+        let Some(sample) = panel.samples.get(panel.selected).cloned() else {
+            return;
+        };
+        let sample_index = panel.selected;
+
+        if panel.resolving_sample == Some(sample_index) {
+            return;
+        }
+        if sample.frames.iter().all(|frame| frame.native.is_none()) {
+            panel.resolving_sample = None;
+            panel.resolve_rx = None;
+            return;
+        }
+
+        panel
+            .resolutions
+            .retain(|(idx, _frame_idx), _resolution| *idx != sample_index);
+
+        let (tx, rx) = mpsc::channel();
+        panel.resolve_rx = Some(rx);
+        panel.resolving_sample = Some(sample_index);
+
+        let tool = addr2line_tool();
+        let root_hint = panel.explicit_container_root.clone().or_else(|| {
+            sample
+                .metadata
+                .as_ref()
+                .and_then(|meta| find_cgroup_root_by_id(meta.cgroup_id))
+        });
+        if let Some(root_hint) = &root_hint {
+            self.push_status(format!("CoreDump root: {}", root_hint.note()));
+        }
+        thread::spawn(move || {
+            for frame in sample.frames {
+                let Some(native) = frame.native else {
+                    continue;
+                };
+                let resolution = resolve_native_frame_with_tool(&tool, &native, root_hint.as_ref());
+                if tx
+                    .send(CoreDumpResolveMsg::Frame {
+                        sample_index,
+                        frame_index: frame.index,
+                        resolution,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = tx.send(CoreDumpResolveMsg::Done { sample_index });
+        });
+    }
+
+    fn apply_coredump_container_pid(&mut self, input: &str) -> anyhow::Result<()> {
+        let pid = input.trim().parse::<u32>()?;
+        let root = ContainerRoot::from_pid(pid);
+        let Some(panel) = &mut self.coredump_panel else {
+            return Ok(());
+        };
+
+        panel.explicit_container_pid = Some(pid);
+        panel.explicit_container_root = Some(root);
+        panel
+            .resolutions
+            .retain(|(idx, _frame_idx), _resolution| *idx != panel.selected);
+        self.push_status(format!(
+            "CoreDump pid root set: /proc/{pid}/root. Re-resolving selected sample."
+        ));
+        self.start_coredump_resolution_for_selected();
+        self.mark_dirty();
+        Ok(())
     }
 
     fn apply_goto_time(&mut self, input: &str) -> anyhow::Result<()> {
@@ -772,6 +1068,7 @@ pub fn run(profile: UiProfile, start: usize, span: usize, timing: bool) -> anyho
         loop {
             // Incremental curve computation; prioritize visible range.
             app.tick_sys_curve();
+            app.tick_coredump_resolver();
 
             if app.dirty {
                 let t0 = Instant::now();
@@ -868,6 +1165,9 @@ fn render_app(buf: &mut Buffer, area: Rect, app: &mut App) {
     }
     if app.show_filters {
         render_popup(buf, area, "filters", &render_filter_lines(app));
+    }
+    if app.coredump_panel.is_some() {
+        render_coredump_panel(buf, area, app);
     }
     if let Some(p) = &app.prompt {
         render_cmdline(buf, area, p);
@@ -1696,6 +1996,353 @@ fn find_record_end_exclusive(records: &[crate::cpa::RecordMeta], t_ms: u64) -> u
 #[cfg(test)]
 mod ui_tests {
     use super::*;
+    use std::{path::Path, sync::Arc};
+
+    #[derive(Clone)]
+    struct DummyData {
+        cfg: crate::cpa::Config,
+        recs: Vec<crate::cpa::RecordMeta>,
+        ids_map: HashMap<u32, Arc<Vec<u32>>>,
+        strings: HashMap<u32, String>,
+        entries: Vec<Vec<(u32, u64)>>,
+    }
+
+    impl crate::profile::ProfileData for DummyData {
+        fn source_path(&self) -> &Path {
+            Path::new("/tmp")
+        }
+
+        fn config(&self) -> &crate::cpa::Config {
+            &self.cfg
+        }
+
+        fn records(&self) -> &[crate::cpa::RecordMeta] {
+            &self.recs
+        }
+
+        fn for_each_entry_in_record(
+            &self,
+            record_idx: usize,
+            cb: &mut dyn FnMut(u32, u64) -> anyhow::Result<()>,
+        ) -> anyhow::Result<()> {
+            for (ids_id, count) in self.entries.get(record_idx).into_iter().flatten() {
+                cb(*ids_id, *count)?;
+            }
+            Ok(())
+        }
+
+        fn ids_for(&self, _ids_id: u32) -> Option<Arc<Vec<u32>>> {
+            self.ids_map.get(&_ids_id).cloned()
+        }
+
+        fn str_for(&self, sid: u32) -> Option<&str> {
+            self.strings.get(&sid).map(|s| s.as_str())
+        }
+
+        fn metadata_for_ids(&self, _ids: &[u32]) -> Option<crate::cpa::Metadata> {
+            None
+        }
+
+        fn ids_id_has_kernel(&self, _ids_id: u32) -> bool {
+            false
+        }
+    }
+
+    fn buffer_to_string(buf: &Buffer, area: Rect) -> String {
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let ch = buf
+                    .cell((x, y))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ');
+                out.push(ch);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn coredump_panel_opens_list_and_detail() {
+        let meta = format!(
+            "{:<15}{:<15}-{}-{}-{}|{}",
+            "py", "python", 1, 2, 333, "SYSTEM"
+        );
+        let mut ids_map = HashMap::new();
+        let mut strings = HashMap::new();
+        strings.insert(1, meta);
+        strings.insert(2, "<# COREDUMP SIGSEGV code=1 #>".to_string());
+        strings.insert(3, "py_frame".to_string());
+        strings.insert(
+            4,
+            "native_leaf @0x400123 [pc=0x400123] [/tmp/missing.so]".to_string(),
+        );
+        ids_map.insert(9, Arc::new(vec![1, 2, 3, 4]));
+
+        let data = DummyData {
+            cfg: crate::cpa::Config::default(),
+            recs: vec![crate::cpa::RecordMeta {
+                start_ms: 1_000,
+                end_ms: 2_000,
+                file_off: 0,
+                entry_len: 0,
+            }],
+            ids_map,
+            strings,
+            entries: vec![vec![(9, 7)]],
+        };
+        let profile = crate::profile::UiProfile {
+            source_path: "/tmp".into(),
+            data: Arc::new(data),
+        };
+        let mut app = App::new(profile, 0, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+
+        let panel = app.coredump_panel.as_ref().unwrap();
+        assert_eq!(panel.view, CoreDumpView::List);
+        assert_eq!(panel.samples.len(), 1);
+        assert_eq!(panel.samples[0].metadata.as_ref().unwrap().pid, 333);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let panel = app.coredump_panel.as_ref().unwrap();
+        assert_eq!(panel.view, CoreDumpView::Detail);
+        assert_eq!(panel.resolving_sample, Some(0));
+    }
+
+    #[test]
+    fn coredump_panel_lists_exit_samples() {
+        let meta = format!(
+            "{:<15}{:<15}-{}-{}-{}|{}",
+            "exworker", "exhost", 1, 2, 5151, "msrv-a-1"
+        );
+        let mut ids_map = HashMap::new();
+        let mut strings = HashMap::new();
+        strings.insert(1, meta);
+        strings.insert(2, "<# EXIT NONZERO raw=768 exit=3 #>".to_string());
+        strings.insert(
+            3,
+            "exit_leaf @0x400123 [pc=0x400123] [/tmp/missing.so]".to_string(),
+        );
+        ids_map.insert(9, Arc::new(vec![1, 2, 3]));
+
+        let data = DummyData {
+            cfg: crate::cpa::Config::default(),
+            recs: vec![crate::cpa::RecordMeta {
+                start_ms: 1_000,
+                end_ms: 2_000,
+                file_off: 0,
+                entry_len: 0,
+            }],
+            ids_map,
+            strings,
+            entries: vec![vec![(9, 2)]],
+        };
+        let profile = crate::profile::UiProfile {
+            source_path: "/tmp".into(),
+            data: Arc::new(data),
+        };
+        let mut app = App::new(profile, 0, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        let panel = app.coredump_panel.as_ref().unwrap();
+        assert_eq!(panel.samples.len(), 1);
+        let summary = format_coredump_sample_summary(0, &panel.samples[0]);
+        assert!(summary.contains("EXIT raw=768 exit=3"), "{summary}");
+        assert!(summary.contains("pid=5151"), "{summary}");
+        assert!(summary.contains("exit_leaf"), "{summary}");
+
+        // the detail resolves native frames as for a coredump
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let panel = app.coredump_panel.as_ref().unwrap();
+        assert_eq!(panel.view, CoreDumpView::Detail);
+        assert_eq!(panel.resolving_sample, Some(0));
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        render_app(&mut buf, area, &mut app);
+        let detail = buffer_to_string(&buf, area);
+        assert!(detail.contains("Exit      : raw=768 exit=3"), "{detail}");
+        assert!(detail.contains("exit_leaf"), "{detail}");
+    }
+
+    fn mk_coredump_app_with_frames(frames: Vec<String>) -> App {
+        let meta = format!(
+            "{:<15}{:<15}-{}-{}-{}|{}",
+            "py", "python", 1, 2, 333, "SYSTEM"
+        );
+        let mut ids = vec![1, 2];
+        let mut strings = HashMap::new();
+        strings.insert(1, meta);
+        strings.insert(2, "<# COREDUMP SIGSEGV code=1 #>".to_string());
+
+        for (idx, frame) in frames.into_iter().enumerate() {
+            let sid = (idx + 3) as u32;
+            ids.push(sid);
+            strings.insert(sid, frame);
+        }
+
+        let mut ids_map = HashMap::new();
+        ids_map.insert(9, Arc::new(ids));
+
+        let data = DummyData {
+            cfg: crate::cpa::Config::default(),
+            recs: vec![crate::cpa::RecordMeta {
+                start_ms: 1_000,
+                end_ms: 2_000,
+                file_off: 0,
+                entry_len: 0,
+            }],
+            ids_map,
+            strings,
+            entries: vec![vec![(9, 7)]],
+        };
+        let profile = crate::profile::UiProfile {
+            source_path: "/tmp".into(),
+            data: Arc::new(data),
+        };
+        let mut app = App::new(profile, 0, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app
+    }
+
+    #[test]
+    fn coredump_detail_scrolls_long_samples_vertically() {
+        let frames = (0..40)
+            .map(|idx| format!("frame_{idx:02}_with_enough_text_to_render"))
+            .collect();
+        let mut app = mk_coredump_app_with_frames(frames);
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+
+        render_app(&mut buf, area, &mut app);
+        let initial = buffer_to_string(&buf, area);
+        assert!(initial.contains("frame_00"));
+        assert!(!initial.contains("frame_20"));
+
+        for _ in 0..25 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+
+        let mut buf = Buffer::empty(area);
+        render_app(&mut buf, area, &mut app);
+        let scrolled = buffer_to_string(&buf, area);
+        assert!(scrolled.contains("frame_20"));
+    }
+
+    #[test]
+    fn coredump_detail_scrolls_long_lines_horizontally() {
+        let long_frame = format!(
+            "native_leaf {} RIGHT_EDGE_TOKEN [pc=0x1234] [/tmp/missing.so]",
+            "x".repeat(120)
+        );
+        let mut app = mk_coredump_app_with_frames(vec![long_frame]);
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+
+        render_app(&mut buf, area, &mut app);
+        let initial = buffer_to_string(&buf, area);
+        assert!(!initial.contains("RIGHT_EDGE_TOKEN"));
+
+        for _ in 0..20 {
+            app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        }
+
+        let mut buf = Buffer::empty(area);
+        render_app(&mut buf, area, &mut app);
+        let scrolled = buffer_to_string(&buf, area);
+        assert!(scrolled.contains("RIGHT_EDGE_TOKEN"));
+    }
+
+    #[test]
+    fn coredump_detail_ctrl_keys_page_vertically() {
+        let frames = (0..80)
+            .map(|idx| format!("frame_{idx:02}_with_enough_text_to_render"))
+            .collect();
+        let mut app = mk_coredump_app_with_frames(frames);
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+
+        render_app(&mut buf, area, &mut app);
+        let initial = buffer_to_string(&buf, area);
+        assert!(initial.contains("frame_00"));
+        assert!(!initial.contains("frame_30"));
+        let page_step = app
+            .coredump_panel
+            .as_ref()
+            .expect("coredump panel")
+            .detail_page_step;
+        assert!(page_step > 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(
+            app.coredump_panel
+                .as_ref()
+                .expect("coredump panel")
+                .detail_scroll,
+            page_step
+        );
+
+        let mut buf = Buffer::empty(area);
+        render_app(&mut buf, area, &mut app);
+        let paged = buffer_to_string(&buf, area);
+        assert!(!paged.contains("frame_00"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert_eq!(
+            app.coredump_panel
+                .as_ref()
+                .expect("coredump panel")
+                .detail_scroll,
+            0
+        );
+
+        let mut buf = Buffer::empty(area);
+        render_app(&mut buf, area, &mut app);
+        let back = buffer_to_string(&buf, area);
+        assert!(back.contains("frame_00"));
+    }
+
+    #[test]
+    fn coredump_detail_omits_duplicate_native_path_and_build_id_lines() {
+        let frame = "native_leaf+0x23 @0x400123 [pc=0x1234] \
+                     [build-id=1234567890abcdef1234567890abcdef12345678] \
+                     [/tmp/missing.so]"
+            .to_string();
+        let mut app = mk_coredump_app_with_frames(vec![frame]);
+        let area = Rect::new(0, 0, 120, 35);
+        let mut buf = Buffer::empty(area);
+
+        render_app(&mut buf, area, &mut app);
+        let text = buffer_to_string(&buf, area);
+
+        assert!(text.contains("Native: pc=0x1234"));
+        assert!(!text.contains("Native: pc=0x1234 path="));
+        assert!(!text.contains("Build ID:"));
+    }
+
+    #[test]
+    fn coredump_detail_pid_root_prompt_records_explicit_pid() {
+        let mut app = mk_coredump_app_with_frames(vec![
+            "native_leaf @0x400123 [pc=0x1234] [/tmp/missing.so]".to_string(),
+        ]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::CoreContainerPid)
+        ));
+
+        for ch in "4242".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let panel = app.coredump_panel.as_ref().unwrap();
+        assert_eq!(panel.explicit_container_pid, Some(4242));
+    }
 
     #[test]
     fn parse_time_ms_ok() {
@@ -1729,6 +2376,7 @@ fn render_cmdline(buf: &mut Buffer, area: Rect, p: &Prompt) {
         PromptKind::Command => ("command", ":"),
         PromptKind::GotoTime => ("goto time (HH:MM:SS[.mmm])", ""),
         PromptKind::SetRange => ("set range (A..B or A B)", ""),
+        PromptKind::CoreContainerPid => ("coredump container pid (/proc/<pid>/root)", ""),
     };
 
     let text = format!("{prefix}{}", p.input.buf);
@@ -1749,20 +2397,351 @@ fn render_cmdline(buf: &mut Buffer, area: Rect, p: &Prompt) {
 }
 
 fn render_popup(buf: &mut Buffer, area: Rect, title: &str, lines: &[Line<'static>]) {
-    let w = area.width.saturating_mul(4) / 5;
-    let h = area.height.saturating_mul(4) / 5;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect {
-        x,
-        y,
-        width: w.max(20),
-        height: h.max(10),
-    };
+    let popup = popup_rect(area);
     Clear.render(popup, buf);
     Paragraph::new(lines.to_vec())
         .block(Block::default().borders(Borders::ALL).title(title))
         .render(popup, buf);
+}
+
+fn popup_rect(area: Rect) -> Rect {
+    let w = area.width.saturating_mul(4) / 5;
+    let h = area.height.saturating_mul(4) / 5;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect {
+        x,
+        y,
+        width: w.max(20),
+        height: h.max(10),
+    }
+}
+
+fn render_coredump_panel(buf: &mut Buffer, area: Rect, app: &mut App) {
+    let Some(panel) = &mut app.coredump_panel else {
+        return;
+    };
+
+    match panel.view {
+        CoreDumpView::List => render_coredump_list(buf, area, panel),
+        CoreDumpView::Detail => render_coredump_detail(buf, area, panel),
+    }
+}
+
+fn render_coredump_list(buf: &mut Buffer, area: Rect, panel: &mut CoreDumpPanel) {
+    let popup = popup_rect(area);
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let fixed = 3usize;
+    let sample_height = inner_height.saturating_sub(fixed).max(1);
+
+    if !panel.samples.is_empty() {
+        if panel.selected < panel.list_scroll {
+            panel.list_scroll = panel.selected;
+        }
+        if panel.selected >= panel.list_scroll.saturating_add(sample_height) {
+            panel.list_scroll = panel.selected + 1 - sample_height;
+        }
+        panel.list_scroll = panel
+            .list_scroll
+            .min(panel.samples.len().saturating_sub(sample_height));
+    }
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("samples: {}", panel.samples.len()),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Enter: detail/resolve   Esc: close   j/k: move",
+        Style::default().fg(Color::Gray),
+    )));
+    lines.push(Line::from(""));
+
+    if panel.samples.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No coredump or non-zero exit samples found.",
+            Style::default().fg(Color::Yellow),
+        )));
+    } else {
+        let start = panel.list_scroll;
+        let end = (start + sample_height).min(panel.samples.len());
+        for idx in start..end {
+            let sample = &panel.samples[idx];
+            let style = if idx == panel.selected {
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format_coredump_sample_summary(idx, sample),
+                style,
+            )));
+        }
+    }
+
+    render_popup(buf, area, "coredump / exit samples", &lines);
+}
+
+fn render_coredump_detail(buf: &mut Buffer, area: Rect, panel: &mut CoreDumpPanel) {
+    let Some(sample) = panel.samples.get(panel.selected) else {
+        render_popup(
+            buf,
+            area,
+            "coredump / exit detail",
+            &[Line::from("No sample selected.")],
+        );
+        return;
+    };
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format_coredump_sample_summary(panel.selected, sample),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "addr2line: {}  env override: {}  r: retry  p: pid root  Ctrl-f/b: page",
+            addr2line_tool(),
+            CPA_ADDR2LINE_ENV
+        ),
+        Style::default().fg(Color::Gray),
+    )));
+    lines.push(Line::from(""));
+    lines.extend(coredump_metadata_lines(sample));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Frames:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(coredump_frame_lines(panel, sample));
+
+    let popup = popup_rect(area);
+    let inner_height = popup.height.saturating_sub(2) as usize;
+    let inner_width = popup.width.saturating_sub(2) as usize;
+    panel.detail_page_step = inner_height.saturating_sub(2).max(1);
+    let max_scroll = lines.len().saturating_sub(inner_height);
+    panel.detail_scroll = panel.detail_scroll.min(max_scroll);
+    let max_hscroll = lines
+        .iter()
+        .map(line_width)
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(inner_width);
+    panel.detail_hscroll = panel.detail_hscroll.min(max_hscroll);
+    let visible: Vec<Line<'static>> = lines
+        .into_iter()
+        .skip(panel.detail_scroll)
+        .take(inner_height.max(1))
+        .map(|line| horizontal_window_line(line, panel.detail_hscroll, inner_width))
+        .collect();
+
+    render_popup(buf, area, "coredump / exit detail", &visible);
+}
+
+fn format_coredump_sample_summary(index: usize, sample: &CoreDumpSample) -> String {
+    let marker = match sample.marker.kind {
+        SampleKind::Exit => format!("EXIT {}", sample.marker.exit.as_deref().unwrap_or("")),
+        SampleKind::CoreDump => sample
+            .marker
+            .signal
+            .as_deref()
+            .unwrap_or("COREDUMP")
+            .to_string(),
+    };
+    let code = sample
+        .marker
+        .code
+        .map(|v| format!(" code={v}"))
+        .unwrap_or_default();
+    let meta = sample
+        .metadata
+        .as_ref()
+        .map(|m| format!(" pid={} comm={} env={}", m.pid, m.comm, m.env))
+        .unwrap_or_else(|| " metadata=parse-failed".to_string());
+    let first_frame = sample
+        .frames
+        .iter()
+        .find(|frame| !frame.raw.starts_with("<# "))
+        .map(|frame| trim_for_summary(&frame.raw, 60))
+        .unwrap_or_default();
+
+    format!(
+        "#{:03} rec={} {}..{} count={} {}{}{}  {}",
+        index + 1,
+        sample.record_index,
+        fmt_ms(sample.start_ms),
+        fmt_ms(sample.end_ms),
+        sample.count,
+        marker,
+        code,
+        meta,
+        first_frame
+    )
+}
+
+fn coredump_metadata_lines(sample: &CoreDumpSample) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "MetaData:",
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    if let Some(meta) = &sample.metadata {
+        lines.push(Line::from(format!("  Thread    : {}", meta.comm)));
+        lines.push(Line::from(format!("  Process   : {}", meta.group_comm)));
+        lines.push(Line::from(format!("  PID       : {}", meta.pid)));
+        lines.push(Line::from(format!("  CPU       : {}", meta.cpu)));
+        lines.push(Line::from(format!("  CGroup ID : {}", meta.cgroup_id)));
+        lines.push(Line::from(format!("  Env       : {}", meta.env)));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  Parse     : failed",
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(format!("  Raw       : {}", sample.metadata_raw)));
+    lines.extend(exit_lines(sample).into_iter().map(Line::from));
+    lines
+}
+
+/* A non-zero exit: its code. */
+fn exit_lines(sample: &CoreDumpSample) -> Vec<String> {
+    if sample.marker.kind != SampleKind::Exit {
+        return Vec::new();
+    }
+    vec![format!(
+        "  Exit      : {}",
+        sample.marker.exit.as_deref().unwrap_or("")
+    )]
+}
+
+fn coredump_frame_lines(panel: &CoreDumpPanel, sample: &CoreDumpSample) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for frame in &sample.frames {
+        lines.push(Line::from(format!("  [{:02}] {}", frame.index, frame.raw)));
+        if let Some(native) = &frame.native {
+            let pc = native
+                .pc
+                .map(|pc| format!("0x{pc:x}"))
+                .unwrap_or_else(|| "(none)".to_string());
+            lines.push(Line::from(Span::styled(
+                format!("       Native: pc={}", pc),
+                Style::default().fg(Color::Gray),
+            )));
+
+            match panel.resolutions.get(&(panel.selected, frame.index)) {
+                Some(resolution) => lines.extend(coredump_resolution_lines(resolution)),
+                None if panel.resolving_sample == Some(panel.selected) => {
+                    lines.push(Line::from(Span::styled(
+                        "       addr2line: pending...",
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+                None => {
+                    lines.push(Line::from(Span::styled(
+                        "       addr2line: not started",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+        }
+    }
+    lines
+}
+
+fn coredump_resolution_lines(resolution: &LineResolution) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let status = match resolution.status {
+        LineResolutionStatus::Resolved => "resolved",
+        LineResolutionStatus::Skipped => "skipped",
+        LineResolutionStatus::Error => "error",
+    };
+    let style = match resolution.status {
+        LineResolutionStatus::Resolved => Style::default().fg(Color::Green),
+        LineResolutionStatus::Skipped => Style::default().fg(Color::Yellow),
+        LineResolutionStatus::Error => Style::default().fg(Color::Red),
+    };
+    lines.push(Line::from(Span::styled(
+        format!("       addr2line: {} ({})", status, resolution.tool),
+        style,
+    )));
+    if let Some(function) = &resolution.function {
+        lines.push(Line::from(format!("       Function : {}", function)));
+    }
+    if let Some(source) = &resolution.source {
+        lines.push(Line::from(format!("       Source   : {}", source)));
+    }
+    if let Some(note) = &resolution.path_note {
+        lines.push(Line::from(format!("       Root     : {}", note)));
+        if !resolution.path.is_empty() {
+            lines.push(Line::from(format!("       ELF      : {}", resolution.path)));
+        }
+    }
+    if let Some(message) = &resolution.message {
+        lines.push(Line::from(format!("       Message  : {}", message)));
+    }
+    lines
+}
+
+fn trim_for_summary(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
+fn line_width(line: &Line<'static>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+fn horizontal_window_line(line: Line<'static>, start_col: usize, width: usize) -> Line<'static> {
+    if start_col == 0 {
+        return line;
+    }
+    if width == 0 {
+        return Line::from("");
+    }
+
+    let end_col = start_col.saturating_add(width);
+    let mut out = Vec::new();
+    let mut col = 0usize;
+
+    for span in line.spans {
+        let style = span.style;
+        let mut content = String::new();
+        for ch in span.content.chars() {
+            let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
+            if cw == 0 {
+                continue;
+            }
+            let next_col = col.saturating_add(cw);
+
+            if next_col <= start_col {
+                col = next_col;
+                continue;
+            }
+            if col >= end_col {
+                break;
+            }
+            if col >= start_col && next_col <= end_col {
+                content.push(ch);
+            }
+
+            col = next_col;
+        }
+        if !content.is_empty() {
+            out.push(Span::styled(content, style));
+        }
+        if col >= end_col {
+            break;
+        }
+    }
+
+    Line::from(out)
 }
 
 fn render_conf_lines(app: &App) -> Vec<Line<'static>> {
@@ -1810,6 +2789,7 @@ fn render_help_lines() -> Vec<Line<'static>> {
         Line::from("  U                      : Aggregate IRQOFF sample CPU number (e.g. '<# IRQOFF ... CPU 47 #>')"),
         Line::from("  I                      : Toggle aggregation (Caller/Callee)"),
         Line::from("  o                      : Show active filters list"),
+        Line::from("  L                      : Coredump / non-zero exit samples (Enter: detail with addr2line, p: pid root)"),
         Line::from("  c                      : Show loaded configuration"),
         Line::from(""),
         Line::from(Span::styled("General:", Style::default().add_modifier(Modifier::BOLD))),
