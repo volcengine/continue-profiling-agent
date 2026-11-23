@@ -11,6 +11,8 @@
 #include "cpa_runtime.h"
 #include "cli_common.h"
 #include "cpa_unwinder.h"
+#include "cpa_sample_pool.h"
+#include "cpa_stack_sample_builder.h"
 #include "cpa_drop_policy.h"
 #include <stdlib.h>
 #include <errno.h>
@@ -59,16 +61,6 @@ static bool capture_callbacks_blocked;
  * blocked flag rejects new callbacks, while the active/inflight counter lets
  * teardown wait until callbacks already inside userspace have returned.
  */
-static unsigned long cpa_stack_count_from_event(unsigned int type, unsigned long diff_ns)
-{
-	unsigned long count = offcpu ? diff_ns : 1;
-
-	if (type & STACK_EVENT_IRQOFF)
-		count = (diff_ns / (1000 * 1000 * 1000 / bpf_capture_config.freq)) + 1;
-
-	return count;
-}
-
 static void kernel_only_fastpath_reset(void)
 {
 	pthread_mutex_lock(&kernel_only_fastpath_lock);
@@ -189,110 +181,6 @@ static void capture_callbacks_resume(void)
 	pthread_mutex_unlock(&capture_callbacks_lock);
 }
 
-/**
- * Copy kernel stack frames from event payload into normalized stack sample.
- */
-static void fill_sample_kstack(struct stack_sample *sample, const struct stack_event *event)
-{
-	size_t kstack_level = event->kstack_sz;
-
-	if (kstack_level > MAX_FP_STACK_LEVEL)
-		kstack_level = MAX_FP_STACK_LEVEL;
-
-	sample->kstack_fp_level = kstack_level;
-	if (kstack_level > 0)
-		memcpy(sample->kstack_fp, event->kstack, kstack_level * sizeof(unsigned long));
-}
-
-/**
- * Build metadata-only sample for kthread/drop-pressure events.
- */
-static struct stack_sample *stack_sample_kernel_build(struct stack_event *event, bool drop)
-{
-	struct stack_sample *sample = calloc(1, sizeof(struct stack_sample));
-	if (!sample)
-		return NULL;
-
-	sample->type = event->type;
-	sample->signal = event->signal;
-	sample->signal_code = event->signal_code;
-	sample->user_mode = event->user_mode;
-	fill_sample_kstack(sample, event);
-
-	sample->stack_count = cpa_stack_count_from_event(event->type, event->diff_ns);
-	if (drop)
-		sample->type |= STACK_EVENT_DROP_BY_PRESSURE;
-
-	sample->cpu = event->cpu;
-	sample->cgid = event->cgid;
-	sample->pid = event->pid;
-	sample->timestamp = event->timestamp;
-
-	memcpy(sample->comm, event->comm, TASK_COMM_LEN);
-	if (event->type & STACK_EVENT_KTHREAD)
-		memcpy(sample->group_comm, kernel_comm, TASK_COMM_LEN);
-	else
-		memcpy(sample->group_comm, event->group_comm, TASK_COMM_LEN);
-
-	return sample;
-}
-
-/**
- * Build full user-mode unwind sample with captured stack/register context.
- */
-static struct stack_sample *stack_sample_build(struct stack_event *e, const char *stack_content)
-{
-	struct stack_sample *sample = (struct stack_sample *)malloc(sizeof(struct gu_stack_info) + e->stack_size + PT_REGS_SIZE + sizeof(struct stack_sample));
-	if (!sample) {
-		CLI_ERROR("malloc stack failed!");
-		return sample;
-	}
-
-	sample->type = e->type;
-	sample->signal = e->signal;
-	sample->signal_code = e->signal_code;
-	sample->timestamp = e->timestamp;
-	sample->user_mode = e->user_mode;
-	fill_sample_kstack(sample, e);
-
-	sample->stack_count = cpa_stack_count_from_event(e->type, e->diff_ns);
-
-	sample->cgid = e->cgid;
-	sample->pid = e->pid;
-
-	memcpy(sample->comm, e->comm, TASK_COMM_LEN);
-	memcpy(sample->group_comm, e->group_comm, TASK_COMM_LEN);
-	sample->cpu = e->cpu;
-
-	struct gu_stack_info *stack = (struct gu_stack_info *)(sample + 1);
-	sample->info = stack;
-	memset(stack, 0, sizeof(struct gu_stack_info));
-
-	stack->stack_size = e->stack_size;
-	/*
-	 * See struct stack_event::pid. offcpu samples carry TID here so
-	 * libgunwinder resolves the blocked thread's stack snapshot correctly.
-	 */
-	stack->pid = e->pid;
-	/* read a process whose leader already exited through this thread */
-	stack->tid = e->tid;
-	stack->unique_id = e->unique_id;
-	stack->regs_size = PT_REGS_SIZE;
-	stack->stack_data = (uint8_t *)(stack + 1);
-	stack->regs = (struct pt_regs *)&(stack->stack_data[stack->stack_size]);
-
-	unsigned int ustack_fp_size = e->ustack_fp_size;
-	if (ustack_fp_size > sizeof(e->ustack_fp))
-		ustack_fp_size = sizeof(e->ustack_fp);
-	memcpy(stack->ustack_fp, e->ustack_fp, ustack_fp_size);
-	stack->ustack_fp_level = ustack_fp_size / sizeof(uint64_t);
-
-	memcpy(stack->regs, e->regs, PT_REGS_SIZE);
-	memcpy(stack->stack_data, stack_content, stack->stack_size);
-
-	return sample;
-}
-
 pthread_mutex_t bpf_exec_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* Configured BPF per-sample execution-time budget in nanoseconds. */
@@ -401,18 +289,27 @@ static void stack_capture_event_process(void *event, unsigned int size, void *us
 
 	enum drop_sample_result drop_state = should_drop_sample();
 
-	if (e->type & STACK_EVENT_KTHREAD || drop_state != DROP_SAMPLE_RESULT_PASS)
-		sample = stack_sample_kernel_build(e, drop_state != DROP_SAMPLE_RESULT_PASS);
-	else
-		sample = stack_sample_build(e, stack);
+	const struct cpa_stack_sample_build_config build_config = {
+		.offcpu = offcpu,
+		.freq = bpf_capture_config.freq,
+		.kernel_comm = kernel_comm,
+	};
 
-	if (!sample)
+	if (e->type & STACK_EVENT_KTHREAD || drop_state != DROP_SAMPLE_RESULT_PASS)
+		sample = cpa_stack_sample_build_kernel(
+			e, drop_state != DROP_SAMPLE_RESULT_PASS, &build_config);
+	else
+		sample = cpa_stack_sample_build_user(e, stack, &build_config);
+
+	if (!sample) {
+		CLI_ERROR("out of memory building a stack sample");
 		goto out;
+	}
 
 	ret = cpa_add_stack_event(sample);
 
 	if (ret)
-		free(sample);
+		cpa_sample_free(sample);
 
 out:
 	if (kernel_only_entered)

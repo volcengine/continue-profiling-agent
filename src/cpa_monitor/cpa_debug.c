@@ -90,7 +90,7 @@ static inline bool should_debug_dump_sample(int pid)
 
 void cpa_debug_dump_sample(struct stack_sample *sample)
 {
-	if (should_debug_dump_sample(sample->pid)) {
+	if (should_debug_dump_sample(sample->tgid)) {
 		gu_debug_dump_sample(sample->info, debug_opt.debug_dump_path, debug_opt.dump_related);
 		if (debug_opt.dump_related)
 			debug_opt.dump_related = 0;

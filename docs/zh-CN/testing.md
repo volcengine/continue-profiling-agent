@@ -42,6 +42,13 @@ pytest -q tests/cpa
 - `tests/cpa/test_offcpu_probe.py`
   - `offcpu` 与 `probe` 的 normal / oneshot 行为
   - `offcpu` 的线程/进程元数据约定
+- `tests/cpa/test_stack_sample_builder.py`
+  - 编译 `tests/cpa/test_stack_sample_builder.c`，普通构建和
+    AddressSanitizer/UndefinedBehaviorSanitizer 构建各跑一次；不需要 root
+  - 样本池（首个合适的块、清零分配、销毁后的分配）
+  - on-CPU 和 off-CPU 样本记录显示哪个任务、按哪个进程归类，以及交给
+    libgunwinder 的进程和被采样线程
+  - off-CPU、IRQ-off 样本的权重，内核线程样本和高压丢弃样本
 - `tests/cpa/test_workload_coverage.py`
   - 多 workload 热栈覆盖
   - 默认 backend 与 perf backend 的 CPU 占用预算

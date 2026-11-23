@@ -8,6 +8,7 @@
 #include "cli_common.h"
 #include "cli_single_queue.h"
 #include "gunwinder/unwinder.h"
+#include "cpa_stack_sample.h"
 #include <cpa_bpf/bpf_event.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -17,46 +18,6 @@
  * @brief Unwinder pipeline interfaces and public stack sample contracts.
  */
 
-/**
- * Event bit flags carried in struct stack_sample::type.
- */
-#define STACK_EVENT_OFFCPU (1 << STACK_EVENT_MAX_BIT)
-#define STACK_EVENT_DROP_BY_PRESSURE (1 << (STACK_EVENT_MAX_BIT + 1))
-#define ALREADY_RESTORE_FLAG (~0UL)
-
-/**
- * struct stack_sample - normalized stack sample consumed by the unwinder
- * @type: sample type bits from BPF/perf capture and CPA-local flags
- * @state: optional state marker used by off-CPU reporting paths
- * @cpu: cpu on which the sample was captured
- * @pid: pid owning the captured sample
- * @timestamp: sample timestamp in nanoseconds
- * @cgid: cgroup id associated with the sample
- * @stack_count: aggregated sample count or weight contributed by this record
- * @user_mode: true when the interrupted context was user mode
- * @kstack_fp: normalized kernel instruction pointers captured with the sample
- * @kstack_fp_level: number of valid entries in @kstack_fp
- * @comm: thread comm recorded for the sample
- * @group_comm: process/group comm recorded for the sample
- * @info: libgunwinder user-stack/register snapshot, or NULL for kernel-only paths
- */
-struct stack_sample {
-	int type;
-	int signal;
-	int signal_code;
-
-	int state;
-	int cpu, pid;
-	unsigned long timestamp, cgid, stack_count;
-	bool user_mode;
-
-	unsigned long kstack_fp[MAX_FP_STACK_LEVEL + 1];
-	unsigned long kstack_fp_level;
-
-	char comm[TASK_COMM_LEN];
-	char group_comm[TASK_COMM_LEN];
-	struct gu_stack_info *info;
-};
 
 /**
  * cpa_add_stack_event - push one captured stack sample into the unwind queue

@@ -11,6 +11,7 @@
 #include "cli_single_queue.h"
 #include "cpa_drop_policy.h"
 #include "cpa_unwinder.h"
+#include "cpa_sample_pool.h"
 #include <stdatomic.h>
 #include "uthash.h"
 #include <asm/ptrace.h>
@@ -33,11 +34,12 @@ struct perf_stack_capture_ctx *perf_ctx = NULL;
 
 static struct stack_sample *perf_stack_sample_build(struct perf_stack_event *event, bool drop_dwarf)
 {
-	struct stack_sample *sample = (struct stack_sample *)malloc(sizeof(struct gu_stack_info) + event->ustack_raw_sz + sizeof(struct pt_regs) + sizeof(struct stack_sample));
+	struct stack_sample *sample = cpa_sample_alloc(sizeof(struct gu_stack_info) + event->ustack_raw_sz + sizeof(struct pt_regs) + sizeof(struct stack_sample));
 	if (!sample) {
 		CLI_ERROR("malloc stack failed!");
 		return sample;
 	}
+	memset(sample, 0, sizeof(*sample));
 
 	sample->timestamp = event->time;
 	sample->cgid = event->cgid;
@@ -59,14 +61,16 @@ static struct stack_sample *perf_stack_sample_build(struct perf_stack_event *eve
 		sample->user_mode = false;
 
 	sample->kstack_fp_level = event->kstack_sz;
-	memcpy(sample->kstack_fp, event->kstack, event->kstack_sz * sizeof(uint64_t));
+	if (sample->kstack_fp_level > MAX_FP_STACK_LEVEL)
+		sample->kstack_fp_level = MAX_FP_STACK_LEVEL;
+	memcpy(sample->kstack_fp, event->kstack, sample->kstack_fp_level * sizeof(uint64_t));
 
 	struct gu_stack_info *stack = (struct gu_stack_info *)(sample + 1);
+	memset(stack, 0, sizeof(*stack));
 	sample->info = stack;
+	stack_sample_set_process(sample, event->pid, event->tid);
 
-	stack->pid = sample->pid;
 	stack->unique_id = 0;
-	stack->flags = 0;
 	stack->stack_data = (uint8_t *)(stack + 1);
 
 	if (drop_dwarf) {
@@ -118,7 +122,7 @@ void perf_capture_handler(struct perf_stack_event *event, void *data)
 	int ret = cpa_add_stack_event(sample);
 
 	if (ret)
-		free(sample);
+		cpa_sample_free(sample);
 }
 
 static enum cpa_worker_init_result cpa_perf_capture_init_fn(void *ctx, void *worker_ctx)

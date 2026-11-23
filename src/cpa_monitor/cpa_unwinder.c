@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ByteDance
 
 #include "cpa_unwinder.h"
+#include "cpa_sample_pool.h"
 #include "cli_stackmap.h"
 #include "cli_stackmap_private.h"
 #include "cpa_capture_mode.h"
@@ -391,6 +392,12 @@ static enum cpa_worker_init_result cpa_unwinder_init(void *cli_ctx, void *worker
 	queue_init(&stack_queue, queue_size);
 	queue_init(&pid_exit_queue, 32768);
 
+	/* keep at most one free buffer per queue slot */
+	unsigned int sample_pool_limit = cpa_sample_pool_default_limit();
+	if (sample_pool_limit > (unsigned int)queue_size)
+		sample_pool_limit = (unsigned int)queue_size;
+	cpa_sample_pool_init(sample_pool_limit);
+
 	init_drop_policy(queue_size);
 
 	if (!init_unwinder_context()) {
@@ -437,7 +444,7 @@ static void cpa_unwinder_destroy(void *worker_ctx)
 		if (!sample)
 			break;
 
-		free(sample);
+		cpa_sample_free(sample);
 	}
 
 	struct exit_event *exit_event = NULL;
@@ -449,6 +456,8 @@ static void cpa_unwinder_destroy(void *worker_ctx)
 	unwinder_worker.worker_ctx = NULL;
 	gu_ctx = NULL;
 	cpa_kernel_symbol_cache_clear();
+	/* a capture callback still running falls back to malloc()/free() */
+	cpa_sample_pool_destroy();
 }
 
 static pthread_mutex_t restart_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -540,15 +549,15 @@ static char *cpa_get_pid_env(struct gu_context *gu_ctx, struct stack_sample *sam
 		env_name = default_env_name;
 	} else if (record_env_name) {
 		int env_size = 0;
-		env_cached = gu_get_pid_private_info(gu_ctx, sample->pid, &env_size);
+		env_cached = gu_get_pid_private_info(gu_ctx, sample->tgid, &env_size);
 		if (env_cached) {
 			env_name = env_cached;
 		} else {
-			env_name = get_env_var_by_pid(sample->pid, record_env_name, record_env_name_count);
+			env_name = get_env_var_by_pid(sample->tgid, record_env_name, record_env_name_count);
 			if (env_name)
-				gu_set_pid_private_info(gu_ctx, sample->pid, env_name, strlen(env_name) + 1);
+				gu_set_pid_private_info(gu_ctx, sample->tgid, env_name, strlen(env_name) + 1);
 			else
-				gu_set_pid_private_info(gu_ctx, sample->pid, default_env_name, strlen(default_env_name) + 1);
+				gu_set_pid_private_info(gu_ctx, sample->tgid, default_env_name, strlen(default_env_name) + 1);
 		}
 	}
 
@@ -708,7 +717,7 @@ static void cpa_finish_unwind_sample(struct stack_sample *sample)
 	cpa_unwind(sample);
 	last_sample_ts = sample->timestamp;
 
-	free(sample);
+	cpa_sample_free(sample);
 
 	pending_queue_size = queue_count(&stack_queue);
 
@@ -1000,7 +1009,7 @@ void cpa_unwind_main_worker_fn(void *worker_ctx)
 
 	if (should_stop()) {
 		if (sample)
-			free(sample);
+			cpa_sample_free(sample);
 		return;
 	}
 

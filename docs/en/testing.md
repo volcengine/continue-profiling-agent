@@ -44,6 +44,14 @@ The default suite currently includes:
 - `tests/cpa/test_offcpu_probe.py`
   - `offcpu` and `probe` in normal and one-shot modes
   - OFFCPU thread/process metadata contract
+- `tests/cpa/test_stack_sample_builder.py`
+  - compiles `tests/cpa/test_stack_sample_builder.c`, plain and with
+    AddressSanitizer/UndefinedBehaviorSanitizer; no root needed
+  - the sample pool (first fit, zeroed allocations, use after destroy)
+  - which task a sample shows and which process it is keyed by, on and off
+    CPU, and what libgunwinder is told (process and sampled thread)
+  - sample weights for off-CPU and IRQ-off samples, kernel-thread and
+    dropped samples
 - `tests/cpa/test_workload_coverage.py`
   - multi-workload hot-stack coverage
   - CPU-budget checks for the default and perf backends
