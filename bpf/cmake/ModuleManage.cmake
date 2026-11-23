@@ -24,6 +24,14 @@ function(add_bpf_skeleton out_skel out_obj bpf_name bpf_source bpf_include_dir)
     endforeach()
     list(APPEND bpf_include_flags "-I${bpf_include_dir}")
 
+    # Variants #include the module's main .bpf.c, and every object includes
+    # shared headers: rebuild when any of them changes, not only the source.
+    set(bpf_deps "${bpf_source}")
+    foreach(dir IN LISTS CPA_BPF_INCLUDE_DIRS bpf_include_dir)
+        file(GLOB dir_deps "${dir}/*.h" "${dir}/*.bpf.c" "${dir}/cpa_bpf/*.h")
+        list(APPEND bpf_deps ${dir_deps})
+    endforeach()
+
     ## BPF object compilation
     add_custom_command(
         OUTPUT "${obj_path}"
@@ -36,7 +44,7 @@ function(add_bpf_skeleton out_skel out_obj bpf_name bpf_source bpf_include_dir)
             -c "${bpf_source}"
             -o "${obj_path}"
         COMMAND "${CPA_BPF_LLVM_STRIP}" -g "${obj_path}"
-        DEPENDS "${bpf_source}" cpa_bpf_libbpf
+        DEPENDS ${bpf_deps} cpa_bpf_libbpf
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     )
 
