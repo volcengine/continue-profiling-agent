@@ -71,6 +71,21 @@ struct {
 	__type(value, struct stack_capture_config);
 } percpu_config SEC(".maps"); // us
 
+/*
+ * One exit sample per process instance: the first caller that inserts the
+ * instance key (BPF_NOEXIST, a single map operation) records, the other
+ * threads of the instance see it and skip.  Entries are never deleted: a
+ * dead instance's key is inert and the LRU reclaims it under capacity
+ * pressure, so deduplication is best effort (more than max_entries
+ * instances exiting inside one exit window can evict a claim).
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct target_key);
+	__type(value, u32);
+} exit_claim SEC(".maps");
+
 #ifdef CPA_USE_RINGBUF
 #ifndef BPF_MAP_TYPE_RINGBUF
 #define BPF_MAP_TYPE_RINGBUF 27
@@ -332,8 +347,13 @@ advance_filtered_irq_timestamp(u64 *time, bool is_irq_timer,
 		*drop_next = 0;
 }
 
+/*
+ * @sidecar: 0 for a periodic or probe sample, STACK_EVENT_COREDUMP or
+ * STACK_EVENT_EXIT_NONZERO for a sidecar one, which carries @sig and @code
+ * (see struct stack_event) and is never cut to the kernel stack alone.
+ */
 static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
-				  bool is_coredump, int coredump_sig, int coredump_code)
+				  unsigned int sidecar, int sig, int code)
 {
 	struct bpf_perf_event_data *ctx = (struct bpf_perf_event_data *)raw_ctx;
 	u32 zero = 0;
@@ -403,7 +423,7 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 	 * never scales with a runtime stack_size scalar (verifier-safe on
 	 * old kernels).
 	 */
-	if (config->only_kernel && !is_coredump) {
+	if (config->only_kernel && !sidecar) {
 		content = bpf_map_lookup_elem(&kernel_event_buf, &cpu);
 		if (!content) {
 			advance_filtered_irq_timestamp(
@@ -437,10 +457,10 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 		event->type = 0;
 		event->signal = 0;
 		event->signal_code = 0;
-		if (is_coredump) {
-			event->type |= STACK_EVENT_COREDUMP;
-			event->signal = coredump_sig;
-			event->signal_code = coredump_code;
+		if (sidecar) {
+			event->type |= sidecar;
+			event->signal = sig;
+			event->signal_code = code;
 		}
 
 		if (config->irqoff_threshold != 0 && is_timer) {
@@ -499,10 +519,10 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 	event->type = 0;
 	event->signal = 0;
 	event->signal_code = 0;
-	if (is_coredump) {
-		event->type |= STACK_EVENT_COREDUMP;
-		event->signal = coredump_sig;
-			event->signal_code = coredump_code;
+	if (sidecar) {
+		event->type |= sidecar;
+		event->signal = sig;
+		event->signal_code = code;
 	}
 
 	if (config->irqoff_threshold != 0 && is_timer) {
@@ -592,14 +612,14 @@ SEC("tracepoint")
 int stack_capture_tp(struct bpf_perf_event_data *ctx)
 {
 	if (should_record())
-		return __stack_capture(ctx, false, false, 0, 0);
+		return __stack_capture(ctx, false, 0, 0, 0);
 	return 0;
 }
 
 SEC("perf_event")
 int stack_capture_timer(struct bpf_perf_event_data *ctx)
 {
-	return __stack_capture(ctx, true, false, 0, 0);
+	return __stack_capture(ctx, true, 0, 0, 0);
 }
 
 /*
@@ -610,14 +630,14 @@ int stack_capture_timer(struct bpf_perf_event_data *ctx)
 SEC("tracepoint")
 int stack_capture_t0(void *ctx)
 {
-	return __stack_capture(ctx, false, false, 0, 0);
+	return __stack_capture(ctx, false, 0, 0, 0);
 }
 
 SEC("kprobe")
 int stack_capture_kprobe(struct bpf_perf_event_data *ctx)
 {
 	if (should_record())
-		return __stack_capture(ctx, false, false, 0, 0);
+		return __stack_capture(ctx, false, 0, 0, 0);
 	return 0;
 }
 
@@ -628,6 +648,25 @@ struct coredump_siginfo_prefix {
 	int si_code;
 };
 
+/*
+ * Claim the exit sample of the current process instance: the first caller
+ * wins.
+ */
+static __always_inline bool exit_claim_once(struct task_struct *cur)
+{
+	struct target_key key;
+	u32 one = 1;
+
+	target_key_of(cur, bpf_get_current_pid_tgid() >> 32, &key);
+	return bpf_map_update_elem(&exit_claim, &key, &one, BPF_NOEXIST) == 0;
+}
+
+/*
+ * A core dump is always recorded.  It also claims the instance, so the
+ * dumping thread's own do_group_exit and the threads the dump zaps add no
+ * EXIT sample.  It cannot retract an EXIT sample another thread emitted just
+ * before (exit_group racing a crash): then both are reported.
+ */
 SEC("kprobe/do_coredump")
 int BPF_KPROBE(stack_capture_coredump)
 {
@@ -639,9 +678,121 @@ int BPF_KPROBE(stack_capture_coredump)
 		cd_sig = cd_info.si_signo;
 		cd_code = cd_info.si_code;
 	}
-	if (should_record())
-		return __stack_capture(ctx, false, true, cd_sig, cd_code);
-	return 0;
+	if (!should_record())
+		return 0;
+	exit_claim_once((struct task_struct *)bpf_get_current_task());
+	return __stack_capture(ctx, false, STACK_EVENT_COREDUMP, cd_sig, cd_code);
+}
+
+/*
+ * Exit non-zero capture: one hook, kprobe/do_group_exit.  Every process
+ * that ends through exit_group(2) or a fatal signal passes here, in each of
+ * its threads, before exit_mm(): the user stack is still there.  Recorded:
+ *
+ *   - the code do_group_exit() hands to do_exit(): once a group exit, core
+ *     dump or exec is in progress the argument is only the thread's wakeup
+ *     SIGKILL and the kernel uses the group's code (exit_group_code()
+ *     mirrors that, so the threads an exec kills, code 0, record nothing);
+ *   - only a non-zero code, of a selected target, when the instance claim
+ *     is still free: one sample per process, the first entrant's stack.
+ *     For exit_group(2) that is the caller; for an external kill or a crash
+ *     any thread of the group (the faulting one is the coredump sidecar's).
+ *
+ * Not covered, by choice: a leader leaving by a raw exit(2) syscall with a
+ * non-zero code and no group exit (libc exit()/_exit() and returning from
+ * main all use exit_group).  It would need a kprobe on do_exit, which runs
+ * for every thread exit on the machine.
+ *
+ * The code is sampled at entry: threads racing exit_group() with different
+ * codes record the first entrant's, which may not be the one the kernel
+ * keeps.
+ */
+
+/* SIGNAL_GROUP_EXIT is 0x4 on every supported kernel (4.14 .. 6.x). */
+#define SIGNAL_GROUP_EXIT 0x4
+
+/* 4.14 .. 5.16: set by de_thread() and by a core dump's zap_threads() */
+struct signal_struct___exit_task {
+	struct task_struct *group_exit_task;
+};
+
+/* 5.17+: set by de_thread(); a core dump sets SIGNAL_GROUP_EXIT instead */
+struct signal_struct___exec_task {
+	struct task_struct *group_exec_task;
+};
+
+/*
+ * The code do_group_exit() passes to do_exit(): signal_group_exit() and
+ * do_group_exit() of 4.14 .. 5.16, and their 5.17+ split.
+ */
+static __always_inline int exit_group_code(struct task_struct *cur, int code)
+{
+	struct signal_struct *sig = BPF_CORE_READ(cur, signal);
+	struct signal_struct___exit_task *old = (void *)sig;
+	struct signal_struct___exec_task *new = (void *)sig;
+
+	if (BPF_CORE_READ(sig, flags) & SIGNAL_GROUP_EXIT)
+		return BPF_CORE_READ(sig, group_exit_code);
+	if (bpf_core_field_exists(old->group_exit_task)) {
+		if (BPF_CORE_READ(old, group_exit_task))
+			return BPF_CORE_READ(sig, group_exit_code);
+	} else if (bpf_core_field_exists(new->group_exec_task)) {
+		if (BPF_CORE_READ(new, group_exec_task))
+			return 0;
+	}
+	return code;
+}
+
+/*
+ * Exit capture's own selection (--exit_comm / --exit_pid) is compared here,
+ * at the exit, against the process name and tgid: no table, no exec or fork
+ * hook.  The name is the leader's, as for --comm.  Without an own selection
+ * the global one applies.
+ */
+static __always_inline bool exit_should_record(struct task_struct *cur)
+{
+	u32 zero = 0;
+	struct stack_capture_config *config;
+	u64 comm[2] = {};
+	u32 tgid = bpf_get_current_pid_tgid() >> 32;
+	bool hit = false;
+
+	config = bpf_map_lookup_elem(&percpu_config, &zero);
+	if (!config)
+		return false;
+	if (!config->exit_own_targets)
+		return should_record();
+
+	BPF_CORE_READ_STR_INTO(&comm, cur, group_leader, comm);
+#pragma unroll
+	for (int i = 0; i < STACK_CAPTURE_EXIT_MAX_COMMS; i++) {
+		if (i < config->n_exit_comms &&
+		    comm[0] == config->exit_comms[i][0] &&
+		    comm[1] == config->exit_comms[i][1])
+			hit = true;
+	}
+#pragma unroll
+	for (int i = 0; i < STACK_CAPTURE_EXIT_MAX_PIDS; i++) {
+		if (i < config->n_exit_pids && config->exit_pids[i] == tgid)
+			hit = true;
+	}
+	return hit;
+}
+
+SEC("kprobe/do_group_exit")
+int BPF_KPROBE(stack_capture_exit_group, int code)
+{
+	struct task_struct *cur = (struct task_struct *)bpf_get_current_task();
+
+	code = exit_group_code(cur, code);
+	if (code == 0)
+		return 0;
+	/* kthreads have no user stack */
+	if (BPF_CORE_READ(cur, flags) & KERNEL_PF_KTHREAD)
+		return 0;
+	if (!exit_should_record(cur) || !exit_claim_once(cur))
+		return 0;
+	return __stack_capture(ctx, false, STACK_EVENT_EXIT_NONZERO, code, 0);
 }
 
 char LICENSE[] SEC("license") = "GPL";

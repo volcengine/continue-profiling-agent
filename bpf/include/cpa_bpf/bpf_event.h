@@ -41,6 +41,7 @@ enum stack_event_type {
 	STACK_EVENT_IRQOFF_BIT,
 	STACK_EVENT_FP_BACKTRACE_BIT,
 	STACK_EVENT_COREDUMP_BIT,
+	STACK_EVENT_EXIT_NONZERO_BIT,
 	STACK_EVENT_MAX_BIT,
 };
 
@@ -49,6 +50,12 @@ enum stack_event_type {
 #define STACK_EVENT_IRQOFF (1U << STACK_EVENT_IRQOFF_BIT)
 #define STACK_EVENT_FP_BACKTRACE (1U << STACK_EVENT_FP_BACKTRACE_BIT)
 #define STACK_EVENT_COREDUMP (1U << STACK_EVENT_COREDUMP_BIT)
+/*
+ * A process ended non-zero through exit_group(2) or a fatal signal:
+ * @signal holds the kernel's raw exit code (exit(N) is N << 8, a signal is
+ * its number, | 0x80 for a core dump), @signal_code is unused.
+ */
+#define STACK_EVENT_EXIT_NONZERO (1U << STACK_EVENT_EXIT_NONZERO_BIT)
 
 #define MAX_FP_STACK_LEVEL (128 - 1)
 #define MAX_KERNEL_STACK_LEVEL MAX_FP_STACK_LEVEL

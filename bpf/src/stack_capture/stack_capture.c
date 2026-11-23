@@ -119,10 +119,57 @@ static struct bpf_link **links = NULL;
 static struct bpf_link *probe_links = NULL;
 static struct bpf_link *coredump_link = NULL;
 static bool coredump_capture_enabled = false;
+static struct bpf_link *exit_link = NULL;
+static bool exit_capture_enabled = false;
+/* exit capture's own selection; none means the global one */
+static unsigned long long exit_comms[STACK_CAPTURE_EXIT_MAX_COMMS][2];
+static int n_exit_comms;
+static unsigned int exit_pids[STACK_CAPTURE_EXIT_MAX_PIDS];
+static int n_exit_pids;
 
 void stack_capture_set_coredump_capture(bool enabled)
 {
 	coredump_capture_enabled = enabled;
+}
+
+/* The one switch: it decides both the autoload and the attach. */
+void stack_capture_set_exit_capture(bool enabled)
+{
+	exit_capture_enabled = enabled;
+}
+
+int stack_capture_set_exit_targets(const char *const *comms, int n_comms, const unsigned int *pids, int n_pids)
+{
+	if (n_comms < 0 || n_comms > STACK_CAPTURE_EXIT_MAX_COMMS || n_pids < 0 ||
+	    n_pids > STACK_CAPTURE_EXIT_MAX_PIDS)
+		return -EINVAL;
+	memset(exit_comms, 0, sizeof(exit_comms));
+	for (int i = 0; i < n_comms; i++) {
+		size_t len = strlen(comms[i]);
+
+		if (!len || len >= TASK_COMM_LEN)
+			return -EINVAL;
+		/* zero-padded like the kernel's comm read into 16 bytes */
+		memcpy(exit_comms[i], comms[i], len);
+	}
+	n_exit_comms = n_comms;
+	for (int i = 0; i < n_pids; i++)
+		exit_pids[i] = pids[i];
+	n_exit_pids = n_pids;
+	return 0;
+}
+
+/* Sidecar kprobes attached by hand, released on every teardown path. */
+static void detach_sidecar_links(void)
+{
+	if (coredump_link) {
+		bpf_link__destroy(coredump_link);
+		coredump_link = NULL;
+	}
+	if (exit_link) {
+		bpf_link__destroy(exit_link);
+		exit_link = NULL;
+	}
 }
 
 /* Shared BPF runtime handles and buffers. */
@@ -167,6 +214,8 @@ static int load_ringbuf(const struct bpf_object_open_opts *optsp)
 	sc_preload_resize(rb_obj->obj, true);
 	if (!coredump_capture_enabled)
 		bpf_program__set_autoload(rb_obj->progs.stack_capture_coredump, false);
+	if (!exit_capture_enabled)
+		bpf_program__set_autoload(rb_obj->progs.stack_capture_exit_group, false);
 	prepare_target(rb_obj->maps.target_pids, rb_obj->progs.stack_capture_t0);
 	ret = stack_capture_ringbuf_bpf__load(rb_obj);
 	if (ret) {
@@ -189,6 +238,8 @@ static int load_perfbuf(const struct bpf_object_open_opts *optsp)
 	sc_preload_resize(obj->obj, false);
 	if (!coredump_capture_enabled)
 		bpf_program__set_autoload(obj->progs.stack_capture_coredump, false);
+	if (!exit_capture_enabled)
+		bpf_program__set_autoload(obj->progs.stack_capture_exit_group, false);
 	prepare_target(obj->maps.target_pids, obj->progs.stack_capture_t0);
 	ret = stack_capture_bpf__load(obj);
 	if (ret) {
@@ -210,6 +261,8 @@ static int load_lite(const struct bpf_object_open_opts *optsp)
 	sc_preload_resize(lite_obj->obj, false);
 	if (!coredump_capture_enabled)
 		bpf_program__set_autoload(lite_obj->progs.stack_capture_coredump, false);
+	if (!exit_capture_enabled)
+		bpf_program__set_autoload(lite_obj->progs.stack_capture_exit_group, false);
 	prepare_target(lite_obj->maps.target_pids, lite_obj->progs.stack_capture_t0);
 	ret = stack_capture_lite_bpf__load(lite_obj);
 	if (ret) {
@@ -300,6 +353,7 @@ static void exit_bpf_module(void)
 	if (!sc_obj)
 		return;
 
+	detach_sidecar_links();
 	(void)stack_capture_clear_comm_stack_limits();
 	free(comm_stack_limit_keys);
 	comm_stack_limit_keys = NULL;
@@ -649,7 +703,7 @@ if (poll_ret < 0) {
 		goto clear;
 	}
 
-	struct stack_capture_config config;
+	struct stack_capture_config config = { 0 };
 config.only_kernel = user_ctx->only_kernel;
 	config.bpf_exec_time_guard_ns = user_ctx->bpf_exec_time_guard_ns;
 
@@ -679,6 +733,11 @@ config.only_kernel = user_ctx->only_kernel;
 		snprintf(config.comm, sizeof(config.comm), "%s", user_ctx->comm);
 	config.comm_len = strnlen(config.comm, sizeof(config.comm));
 	config.target_dynamic = user_ctx->target_dynamic;
+	config.exit_own_targets = n_exit_comms || n_exit_pids;
+	config.n_exit_comms = n_exit_comms;
+	memcpy(config.exit_comms, exit_comms, sizeof(config.exit_comms));
+	config.n_exit_pids = n_exit_pids;
+	memcpy(config.exit_pids, exit_pids, sizeof(config.exit_pids));
 
 	for (i = 0; i < libbpf_num_possible_cpus(); i++)
 		memcpy(&percpu_config_buf[i], &config, sizeof(struct stack_capture_config));
@@ -735,10 +794,23 @@ config.only_kernel = user_ctx->only_kernel;
 		}
 	}
 
+	if (exit_capture_enabled) {
+		exit_link = bpf_program__attach_kprobe(
+			sc_prog("stack_capture_exit_group"), false, "do_group_exit");
+		if (!exit_link) {
+			BPF_ERR("failed to attach kprobe/do_group_exit errno=%d\n", errno);
+			err = -errno;
+			if (!err)
+				err = -EIO;
+			goto clear;
+		}
+	}
+
 	return 0;
 
 clear:
 	bpf_event_poll_unregister_no_free(perf_output_events);
+	detach_sidecar_links();
 
 	for (i = 0; i < libbpf_num_possible_cpus(); i++) {
 		if (links && links[i]) {

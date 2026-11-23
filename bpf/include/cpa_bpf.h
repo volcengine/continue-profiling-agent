@@ -77,6 +77,17 @@ struct stack_capture_ctx {
 
 /* Attach the do_coredump kprobe and tag crash-time samples. */
 void stack_capture_set_coredump_capture(bool enabled);
+/*
+ * Attach the do_group_exit kprobe: one sample, tagged STACK_EVENT_EXIT_NONZERO,
+ * per selected process that ends with a non-zero code.
+ */
+void stack_capture_set_exit_capture(bool enabled);
+/*
+ * Exit capture's own selection, compared at the exit: process names (each
+ * shorter than 16 bytes, at most 8) or tgids (at most 16).  None: the global
+ * selection applies.  -EINVAL on a bad list.
+ */
+int stack_capture_set_exit_targets(const char *const *comms, int n_comms, const unsigned int *pids, int n_pids);
 /* mode: 0=auto 1=perfbuf 2=ringbuf; ring_mb resizes the ring buffer. */
 void stack_capture_set_datapath(int mode, unsigned int ring_mb);
 

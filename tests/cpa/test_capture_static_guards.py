@@ -84,8 +84,8 @@ def test_kernel_only_uses_fixed_event_buffer_and_size() -> None:
     ).read_text(encoding="utf-8")
     assert "kernel_event_buf SEC(\".maps\")" in bpf_source
     branch = _body(bpf_source, "static __always_inline int __stack_capture")
-    # coredump bypasses the kernel-only fast path so it keeps the user stack
-    only_kernel = branch[branch.index("if (config->only_kernel && !is_coredump) {") :]
+    # a sidecar sample (coredump, exit) bypasses the kernel-only fast path so it keeps the user stack
+    only_kernel = branch[branch.index("if (config->only_kernel && !sidecar) {") :]
     assert "bpf_map_lookup_elem(&kernel_event_buf, &cpu)" in only_kernel
     # fixed, stack_size-independent output length
     assert "(u8 *)event, sizeof(struct stack_event))" in only_kernel

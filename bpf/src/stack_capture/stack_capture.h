@@ -13,6 +13,9 @@
 
 #define STACK_CAPTURE_COMM_LIMIT_MAX_ENTRIES 40960
 #define STACK_CAPTURE_DEFAULT_COMM_STACK_LIMIT_SIZE 4096
+/* --exit_comm / --exit_pid limits */
+#define STACK_CAPTURE_EXIT_MAX_COMMS 8
+#define STACK_CAPTURE_EXIT_MAX_PIDS 16
 
 struct stack_capture_config {
 unsigned int stack_offset;
@@ -34,6 +37,16 @@ int comm_len;
 bool only_kernel;
 /* Sample the processes of target_ctl's target set instead of pid/comm. */
 int target_dynamic;
+/*
+ * Exit capture's own selection: when set, an exit is recorded for a process
+ * whose name (zero-padded to 16 bytes) or tgid is listed, whatever the
+ * global selection.
+ */
+int exit_own_targets;
+int n_exit_comms;
+unsigned long long exit_comms[STACK_CAPTURE_EXIT_MAX_COMMS][2];
+int n_exit_pids;
+unsigned int exit_pids[STACK_CAPTURE_EXIT_MAX_PIDS];
 };
 
 /* Key of the userspace-managed slow-comm user-stack limit map. */
