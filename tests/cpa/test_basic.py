@@ -4,6 +4,8 @@
 
 import subprocess
 
+import re
+
 import pytest
 
 from .conftest import run_command
@@ -62,12 +64,16 @@ def test_cpa_monitor_bench_reports_dwarf_unwind_stats(tmp_path):
 
     full_output = f"{stdout}{stderr}"
     assert return_code == 0, full_output
-    assert "Bench DWARF Unwind:" in full_output
-    assert "rate=" in full_output
-    assert "avg=" in full_output
-    assert "min=" in full_output
-    assert "max=" in full_output
-    assert "Bench DWARF Histogram:" in full_output
+    reports = re.findall(
+        r"Bench DWARF Unwind: count=(\d+) rate=[\d.]+/s avg=[\d.]+ us "
+        r"min=[\d.]+ us max=[\d.]+ us", full_output)
+    assert reports, full_output
+    # only samples whose final stack is DWARF are timed, and a window in
+    # which the frame-pointer stack won every sample has nothing to bucket
+    if any(int(count) for count in reports):
+        assert "Bench DWARF Histogram:" in full_output, full_output
+    else:
+        assert "Bench DWARF Histogram:" not in full_output, full_output
 
 
 @pytest.mark.parametrize(
