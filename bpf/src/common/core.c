@@ -190,6 +190,8 @@ void free_bpf()
 {
 	int i;
 
+	if (!bpf_init_done)
+		return;
 	bpf_init_done = false;
 	bpf_event_poll_destroy();
 

@@ -74,8 +74,14 @@ int main(int argc, const char *argv[])
 
 	ret = do_cli_process(argc, argv);
 
-	if (get_bpf_mask())
-		free_bpf();
+	/*
+	 * Also when every module was already disabled (the runtime's teardown
+	 * does that): the event poll thread is joined here, before the process
+	 * exits.  Left to exit_group(), its BPF objects are released while
+	 * sibling threads are still exiting through the tracepoints they used,
+	 * which livelocked a 4.14 kernel in do_exit().
+	 */
+	free_bpf();
 
 	return ret;
 }
