@@ -8,6 +8,7 @@
 #include <bpf/bpf_core_read.h>
 #include <linux/version.h>
 #include "core_fixes.bpf.h"
+#include "target_maps.bpf.h"
 
 #include <cpa_bpf/bpf_event.h>
 #include "offcpu_capture.h"
@@ -151,8 +152,13 @@ static __always_inline void fill_kernel_stack(struct bpf_perf_event_data *ctx, s
 #define read_pt_regs pt_regs
 #endif
 
-#define SHOULD_RECORD(now_pid, now_tgid, now_comm)                                                                                                                                                                                                             \
+#define SHOULD_RECORD_SCALAR(now_pid, now_tgid, now_comm)                                                                                                                                                                                                             \
 	((config->pid == 0 && config->comm[0] == '\0') || (config->pid != 0 && (config->pid == now_pid || config->pid == now_tgid)) || (config->comm[0] != '\0' && comm_diff(config->comm, now_comm, config->comm_len) == 0))
+
+/* Dynamic targets replace the scalar pid/comm filter with the target set. */
+#define SHOULD_RECORD(task, now_pid, now_tgid, now_comm) \
+	(config->target_dynamic ? target_task_tracked(task, now_tgid) : \
+				  SHOULD_RECORD_SCALAR(now_pid, now_tgid, now_comm))
 
 static __always_inline int oncpu(void *ctx, struct task_struct *prev, struct task_struct *curr);
 
@@ -191,7 +197,7 @@ static __always_inline int oncpu(void *ctx, struct task_struct *prev, struct tas
 	__builtin_memset(comm, 0, TASK_COMM_LEN);
 	BPF_CORE_READ_STR_INTO(&comm, prev, comm);
 
-	if (SHOULD_RECORD(pid, tgid, comm))
+	if (SHOULD_RECORD(prev, pid, tgid, comm))
 		bpf_map_update_elem(&pid_start, &pid, &time, BPF_ANY);
 
 	/* check oncpu pid should record */
@@ -201,7 +207,7 @@ static __always_inline int oncpu(void *ctx, struct task_struct *prev, struct tas
 	__builtin_memset(comm, 0, TASK_COMM_LEN);
 	bpf_get_current_comm(&comm, TASK_COMM_LEN);
 
-	if (!SHOULD_RECORD(pid, tgid, comm))
+	if (!SHOULD_RECORD(cur, pid, tgid, comm))
 		return 0;
 
 	prev_time = bpf_map_lookup_elem(&pid_start, &pid);

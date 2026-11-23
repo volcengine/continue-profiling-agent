@@ -16,6 +16,7 @@
 #include <cpa_bpf/bpf_event.h>
 #include "bpf_event_poll.h"
 #include "offcpu_capture.h"
+#include "target_ctl.h"
 
 /**
  * @file offcpu_capture.c
@@ -28,6 +29,38 @@ static struct bpf_object *oc_obj;
 static struct bpf_program *finish_task_switch_prog;
 static int perf_output_events, percpu_config, stack_content_buf, pid_start;
 static int stacks_fd = -1;
+
+/* Dynamic target selection (see target_ctl.h). */
+static int target_owner_fd = -1;
+static bool target_dynamic_requested;
+static int target_pids_fd = -1;
+
+void offcpu_capture_set_target(int owner_fd, bool dynamic)
+{
+	target_owner_fd = owner_fd;
+	target_dynamic_requested = dynamic;
+}
+
+int offcpu_capture_target_pids_fd(void)
+{
+	return target_pids_fd;
+}
+
+/* Between open and load: share target_ctl's map, or shrink the private one. */
+static void prepare_target(struct bpf_map *pids_map)
+{
+	int err;
+
+	if (!target_dynamic_requested) {
+		target_ctl_adopt_pids_map(pids_map, -1);
+		return;
+	}
+	if (target_owner_fd < 0 || target_ctl_force_private_map())
+		return;
+	err = target_ctl_adopt_pids_map(pids_map, target_owner_fd);
+	if (err)
+		BPF_WARN("offcpu_capture: target_pids not shared (%d)\n", err);
+}
 static struct offcpu_capture_config *percpu_config_buf = NULL;
 
 static char *cpu_array_buf = NULL;
@@ -57,6 +90,7 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 		obj = offcpu_capture_bpf__open_opts(optsp);
 		if (obj) {
 			bpf_map__set_max_entries(obj->maps.stack_content_buf, libbpf_num_possible_cpus());
+			prepare_target(obj->maps.target_pids);
 			ret = offcpu_capture_bpf__load(obj);
 			if (ret) {
 				offcpu_capture_bpf__destroy(obj);
@@ -76,6 +110,7 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 			return -1;
 		}
 		bpf_map__set_max_entries(lite_obj->maps.stack_content_buf, libbpf_num_possible_cpus());
+		prepare_target(lite_obj->maps.target_pids);
 		ret = offcpu_capture_lite_bpf__load(lite_obj);
 		if (ret) {
 			BPF_ERR("bpf load failed func=%s ret=%d\n", __func__, ret);
@@ -92,6 +127,8 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 			 has_get_stack ? "the full object did not load" : "no bpf_get_stack");
 	}
 
+	/* on 4.14 a reused map has no name: reach it through the skeleton */
+	target_pids_fd = bpf_map__fd(lite_obj ? lite_obj->maps.target_pids : obj->maps.target_pids);
 	stack_content_buf = oc_map_fd("stack_content_buf");
 	perf_output_events = oc_map_fd("perf_output_events");
 	percpu_config = oc_map_fd("percpu_config");
@@ -129,6 +166,7 @@ static void exit_bpf_module(void)
 	oc_obj = NULL;
 	finish_task_switch_prog = NULL;
 	stacks_fd = -1;
+	target_pids_fd = -1;
 }
 
 /* See stack_capture_lookup_kstack(). */
@@ -257,6 +295,7 @@ int setup_offcpu_capture_event(int freq, bpf_event_process_fn fn, struct offcpu_
 		err = -EINVAL;
 		goto clear;
 	}
+	config.target_dynamic = user_ctx->target_dynamic;
 
 	for (i = 0; i < libbpf_num_possible_cpus(); i++)
 		memcpy(&percpu_config_buf[i], &config, sizeof(struct offcpu_capture_config));

@@ -22,6 +22,7 @@
 	FN(stack_capture)                                                                                                                                                                                                                                      \
 	FN(offcpu_capture)                                                                                                                                                                                                                                     \
 	FN(process_exit)                                                                                                                                                                                                                                       \
+	FN(target_ctl)                                                                                                                                                                                                                                         \
 	/* */
 
 #define __BPF_ENUM_FN(x) BPF_MODULE_##x,
@@ -70,6 +71,8 @@ struct stack_capture_ctx {
 	/* BPF per-sample user-stack copy budget in ns; 0 disables. */
 	unsigned long long bpf_exec_time_guard_ns;
 	bool enable_coredump_capture;
+	/* sample target_ctl's target set; @pid and @comm are then unused */
+	bool target_dynamic;
 };
 
 /* Attach the do_coredump kprobe and tag crash-time samples. */
@@ -97,6 +100,8 @@ int stack_capture_lookup_kstack(long kstack_id, unsigned long *kstack, int max_l
 struct offcpu_capture_ctx {
 	int pid;
 	char comm[TASK_COMM_LEN];
+	/* sample target_ctl's target set; @pid and @comm are then unused */
+	bool target_dynamic;
 };
 
 /* Clamp the copied user-stack payload for off-CPU capture. */
@@ -107,6 +112,18 @@ int setup_offcpu_capture_event(int freq, bpf_event_process_fn fn, struct offcpu_
 
 /* Like stack_capture_lookup_kstack(), for off-CPU samples. */
 int offcpu_capture_lookup_kstack(long kstack_id, unsigned long *kstack, int max_level);
+
+/*
+ * Dynamic target selection: before the capture module is initialised, name
+ * target_ctl's target_pids fd to share (@dynamic false: keep a one-entry
+ * private copy).  After init, the fd each object really uses, to prove the
+ * map is shared, and stack_capture's t0 program for target_ctl's exec hook.
+ */
+void stack_capture_set_target(int owner_fd, bool dynamic);
+int stack_capture_target_pids_fd(void);
+int stack_capture_t0_prog_fd(void);
+void offcpu_capture_set_target(int owner_fd, bool dynamic);
+int offcpu_capture_target_pids_fd(void);
 
 /* Subscribe to process-exit notifications used for pid-context retirement. */
 int setup_process_exit_event(bpf_event_process_fn fn);

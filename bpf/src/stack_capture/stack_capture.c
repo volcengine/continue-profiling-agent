@@ -19,6 +19,7 @@
 #include "trace_helpers.h"
 #include <cpa_bpf/bpf_event.h>
 #include "bpf_event_poll.h"
+#include "target_ctl.h"
 #include "stack_capture.h"
 
 /**
@@ -54,6 +55,56 @@ static int sc_map_fd(const char *name)
 }
 static int perf_output_events, percpu_config, stack_content_buf;
 static int stacks_fd = -1;
+
+/* Dynamic target selection (see target_ctl.h). */
+static int target_owner_fd = -1;
+static bool target_dynamic_requested;
+static int target_pids_fd = -1;
+static int t0_prog_fd = -1;
+
+void stack_capture_set_target(int owner_fd, bool dynamic)
+{
+	target_owner_fd = owner_fd;
+	target_dynamic_requested = dynamic;
+}
+
+int stack_capture_target_pids_fd(void)
+{
+	return target_pids_fd;
+}
+
+int stack_capture_t0_prog_fd(void)
+{
+	return t0_prog_fd;
+}
+
+/*
+ * Between open and load of every object: adopt target_ctl's target_pids, or
+ * shrink the unused private copy, and load the t0 program only when a
+ * dynamic selection can tail-call it.
+ */
+static void prepare_target(struct bpf_map *pids_map, struct bpf_program *t0)
+{
+	int err;
+
+	bpf_program__set_autoload(t0, target_dynamic_requested);
+	if (!target_dynamic_requested) {
+		target_ctl_adopt_pids_map(pids_map, -1);
+		return;
+	}
+	if (target_owner_fd < 0 || target_ctl_force_private_map())
+		return;
+	err = target_ctl_adopt_pids_map(pids_map, target_owner_fd);
+	if (err)
+		BPF_WARN("stack_capture: target_pids not shared (%d)\n", err);
+}
+
+/* On 4.14 a reused map has no name: reach it through the skeleton. */
+static void record_target_fds(struct bpf_map *pids_map, struct bpf_program *t0)
+{
+	target_pids_fd = bpf_map__fd(pids_map);
+	t0_prog_fd = target_dynamic_requested ? bpf_program__fd(t0) : -1;
+}
 static int kernel_event_buf;
 static int comm_stack_limit_fd = -1;
 static pthread_mutex_t comm_stack_limit_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -111,6 +162,7 @@ static int load_ringbuf(const struct bpf_object_open_opts *optsp)
 	sc_preload_resize(rb_obj->obj, true);
 	if (!coredump_capture_enabled)
 		bpf_program__set_autoload(rb_obj->progs.stack_capture_coredump, false);
+	prepare_target(rb_obj->maps.target_pids, rb_obj->progs.stack_capture_t0);
 	ret = stack_capture_ringbuf_bpf__load(rb_obj);
 	if (ret) {
 		stack_capture_ringbuf_bpf__destroy(rb_obj);
@@ -132,6 +184,7 @@ static int load_perfbuf(const struct bpf_object_open_opts *optsp)
 	sc_preload_resize(obj->obj, false);
 	if (!coredump_capture_enabled)
 		bpf_program__set_autoload(obj->progs.stack_capture_coredump, false);
+	prepare_target(obj->maps.target_pids, obj->progs.stack_capture_t0);
 	ret = stack_capture_bpf__load(obj);
 	if (ret) {
 		stack_capture_bpf__destroy(obj);
@@ -152,6 +205,7 @@ static int load_lite(const struct bpf_object_open_opts *optsp)
 	sc_preload_resize(lite_obj->obj, false);
 	if (!coredump_capture_enabled)
 		bpf_program__set_autoload(lite_obj->progs.stack_capture_coredump, false);
+	prepare_target(lite_obj->maps.target_pids, lite_obj->progs.stack_capture_t0);
 	ret = stack_capture_lite_bpf__load(lite_obj);
 	if (ret) {
 		stack_capture_lite_bpf__destroy(lite_obj);
@@ -217,6 +271,12 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 	comm_stack_limit_fd = sc_map_fd("comm_stack_limit");
 	percpu_config = sc_map_fd("percpu_config");
 	stacks_fd = use_lite ? sc_map_fd("stacks") : -1;
+	if (use_ringbuf)
+		record_target_fds(rb_obj->maps.target_pids, rb_obj->progs.stack_capture_t0);
+	else if (use_lite)
+		record_target_fds(lite_obj->maps.target_pids, lite_obj->progs.stack_capture_t0);
+	else
+		record_target_fds(obj->maps.target_pids, obj->progs.stack_capture_t0);
 	perf_output_events = use_ringbuf ? sc_map_fd("events_rb")
 				       : sc_map_fd("perf_output_events");
 	BPF_INFO("stack_capture object=%s datapath=%s ring_size=%u\n",
@@ -271,6 +331,8 @@ static void exit_bpf_module(void)
 	use_ringbuf = false;
 	use_lite = false;
 	stacks_fd = -1;
+	target_pids_fd = -1;
+	t0_prog_fd = -1;
 }
 
 /*
@@ -611,6 +673,7 @@ config.only_kernel = user_ctx->only_kernel;
 	if (user_ctx->comm)
 		snprintf(config.comm, sizeof(config.comm), "%s", user_ctx->comm);
 	config.comm_len = strnlen(config.comm, sizeof(config.comm));
+	config.target_dynamic = user_ctx->target_dynamic;
 
 	for (i = 0; i < libbpf_num_possible_cpus(); i++)
 		memcpy(&percpu_config_buf[i], &config, sizeof(struct stack_capture_config));

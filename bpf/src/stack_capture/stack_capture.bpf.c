@@ -8,6 +8,7 @@
 #include <bpf/bpf_core_read.h>
 #include <linux/version.h>
 #include "core_fixes.bpf.h"
+#include "target_maps.bpf.h"
 
 #include <cpa_bpf/bpf_event.h>
 #include "stack_capture.h"
@@ -144,6 +145,10 @@ static __always_inline bool should_record(void)
 	unsigned int pid = 0, tgid = 0;
 	pid = pid_res >> 32;
 	tgid = pid_res;
+
+	if (config->target_dynamic)
+		return target_task_tracked(
+			(struct task_struct *)bpf_get_current_task(), pid);
 
 	char comm[TASK_COMM_LEN];
 	__builtin_memset(comm, 0, TASK_COMM_LEN);
@@ -364,7 +369,15 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 	}
 
 	tid = bpf_get_current_pid_tgid();
-	if (is_timer) {
+	if (is_timer && config->target_dynamic) {
+		/* one lookup: rules were decided where the process was born */
+		if (!target_task_tracked((struct task_struct *)bpf_get_current_task(), pid)) {
+			advance_filtered_irq_timestamp(
+				&time, config->irqoff_threshold != 0,
+				perf_throttled_count);
+			return 0;
+		}
+	} else if (is_timer) {
 		char timer_comm[TASK_COMM_LEN] = {};
 		bpf_get_current_comm(&timer_comm, sizeof(timer_comm));
 		{
@@ -587,6 +600,17 @@ SEC("perf_event")
 int stack_capture_timer(struct bpf_perf_event_data *ctx)
 {
 	return __stack_capture(ctx, true, false, 0, 0);
+}
+
+/*
+ * t0 sample of a process target_ctl has just selected at exec.  Only
+ * reachable through target_ctl's t0_progs tail call, which runs once the
+ * exec'ing process is in the target set, so no gate is needed here.
+ */
+SEC("tracepoint")
+int stack_capture_t0(void *ctx)
+{
+	return __stack_capture(ctx, false, false, 0, 0);
 }
 
 SEC("kprobe")

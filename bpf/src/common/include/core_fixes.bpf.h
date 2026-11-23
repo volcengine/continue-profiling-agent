@@ -118,6 +118,24 @@ static __always_inline u64 node_cgroup_id(struct kernfs_node *node)
 	}
 }
 
+/* Linux 6.15 renamed kernfs_node::parent to __parent (now RCU-protected). */
+struct kernfs_node___rcu_parent {
+	struct kernfs_node *__parent;
+};
+
+struct kernfs_node___parent {
+	struct kernfs_node *parent;
+};
+
+static __always_inline struct kernfs_node *kernfs_node_parent(struct kernfs_node *node)
+{
+	struct kernfs_node___rcu_parent *n = (void *)node;
+
+	if (bpf_core_field_exists(n->__parent))
+		return BPF_CORE_READ(n, __parent);
+	return BPF_CORE_READ((struct kernfs_node___parent *)node, parent);
+}
+
 static __always_inline u64 task_group_cgroup_id(struct task_group *tg)
 {
 	struct kernfs_node *node;

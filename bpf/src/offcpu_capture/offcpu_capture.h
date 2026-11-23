@@ -17,6 +17,8 @@ struct offcpu_capture_config {
 	int pid;
 	char comm[16];
 	int comm_len;
+	/* Sample the processes of target_ctl's target set instead of pid/comm. */
+	int target_dynamic;
 };
 
 #endif

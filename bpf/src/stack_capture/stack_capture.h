@@ -32,6 +32,8 @@ int pid;
 char comm[16];
 int comm_len;
 bool only_kernel;
+/* Sample the processes of target_ctl's target set instead of pid/comm. */
+int target_dynamic;
 };
 
 /* Key of the userspace-managed slow-comm user-stack limit map. */
