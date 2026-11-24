@@ -529,6 +529,10 @@ int cli_stackmap_enable_timewheel(struct cli_stackmap *map, uint64_t hold_ms)
 	return 0;
 }
 
+/*
+ * The current stack ends here, counted or not: the next one must not
+ * start with its frames.
+ */
 int cli_stackmap_done_at(struct cli_stackmap *map, uint64_t count, uint64_t record_ms)
 {
 	uint32_t ids_id = 0;
@@ -536,7 +540,9 @@ int cli_stackmap_done_at(struct cli_stackmap *map, uint64_t count, uint64_t reco
 
 	if (!map || !map->timewheel)
 		return cli_stackmap_done(map, count);
-	if (cli_stackmap_intern_current_ids(map, &ids_id) != 0)
+	ret = cli_stackmap_intern_current_ids(map, &ids_id);
+	cli_stackmap_current_reset(map, 0);
+	if (ret != 0)
 		return -1;
 
 	pthread_mutex_lock(&map->id_count_lock);
@@ -546,9 +552,6 @@ int cli_stackmap_done_at(struct cli_stackmap *map, uint64_t count, uint64_t reco
 		CLI_ERROR("add stackmap timewheel count failed\n");
 		return -1;
 	}
-
-	cli_stackmap_current_reset(map, 0);
-
 	return 0;
 }
 
@@ -594,8 +597,14 @@ int cli_stackmap_done(struct cli_stackmap *map, uint64_t count)
 {
 	struct id_count *id_count = NULL;
 	uint32_t ids_id = 0;
+	int ret;
 
-	if (cli_stackmap_intern_current_ids(map, &ids_id) != 0)
+	if (!map)
+		return -1;
+	/* like cli_stackmap_done_at(), the current stack ends either way */
+	ret = cli_stackmap_intern_current_ids(map, &ids_id);
+	cli_stackmap_current_reset(map, 0);
+	if (ret != 0)
 		return -1;
 
 	pthread_mutex_lock(&map->id_count_lock);
@@ -607,9 +616,6 @@ int cli_stackmap_done(struct cli_stackmap *map, uint64_t count)
 		id_count->count += count;
 		pthread_mutex_unlock(&map->id_count_lock);
 	}
-
-	cli_stackmap_current_reset(map, 0);
-
 	return 0;
 }
 
