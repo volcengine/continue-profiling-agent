@@ -9,6 +9,9 @@
 #include <linux/version.h>
 #include "core_fixes.bpf.h"
 #include "target_maps.bpf.h"
+#ifdef CPA_STACK_VMA_BOUND
+#include "user_stack_vma.bpf.h"
+#endif
 
 #include <cpa_bpf/bpf_event.h>
 #include "stack_capture.h"
@@ -339,6 +342,51 @@ static __always_inline int read_user_stack(struct stack_capture_config *config, 
 #endif
 	return read_size;
 }
+
+#ifdef CPA_STACK_VMA_BOUND
+/*
+ * Copy the user stack up to the end of the VMA holding SP and never past it.
+ * Inside that one mapping a page that cannot be read (never touched, or
+ * swapped out) comes back zero-filled from the helper and the copy goes on, so
+ * a large frame whose middle pages were never written no longer cuts the
+ * stack at its first hole.  A stack in an I/O or PFN mapping is not read at
+ * all; without a VMA the page-by-page copy above applies to this sample.
+ */
+static __always_inline int read_user_stack_in_vma(struct stack_capture_config *config, u8 *stack, u64 sp)
+{
+	u32 read_size = 0;
+	u32 stack_capture_size = stack_capture_effective_size(config);
+	u64 stack_page_start = sp & ~(PAGE_SIZE - 1);
+	u64 copy_start_ns;
+	u64 vma_end = 0;
+	int i = 0;
+
+	switch (user_stack_vma_end(sp, &vma_end)) {
+	case USER_STACK_VMA_DEVICE:
+		return 0;
+	case USER_STACK_VMA_UNKNOWN:
+		return read_user_stack(config, stack, sp);
+	default:
+		break;
+	}
+	copy_start_ns = bpf_ktime_get_ns();
+#pragma clang loop unroll(full)
+	for (i = 0; i < MAX_STACK_CAPTURE_PAGES; i++) {
+		if (read_size >= stack_capture_size)
+			break;
+		if (stack_page_start >= vma_end)
+			break;
+		bpf_probe_read_user(stack, PAGE_SIZE, (u8 *)stack_page_start);
+		stack_page_start += PAGE_SIZE;
+		read_size += PAGE_SIZE;
+		stack += PAGE_SIZE;
+		if (config->bpf_exec_time_guard_ns != 0 &&
+		    bpf_ktime_get_ns() - copy_start_ns > config->bpf_exec_time_guard_ns)
+			break;
+	}
+	return read_size;
+}
+#endif
 
 static __always_inline void fill_kernel_stack(void *raw_ctx, struct stack_event *event)
 {
@@ -740,7 +788,11 @@ static __always_inline int __stack_capture(void *raw_ctx, bool is_timer,
 	if (event->sp >= config->task_max)
 		goto send_event;
 
+#ifdef CPA_STACK_VMA_BOUND
+	event->stack_size = read_user_stack_in_vma(config, content, event->sp);
+#else
 	event->stack_size = read_user_stack(config, content, event->sp);
+#endif
 
 send_event:
 

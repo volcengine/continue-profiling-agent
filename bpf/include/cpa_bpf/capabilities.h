@@ -24,6 +24,8 @@ enum cpa_capability_id {
 	CPA_CAP_RINGBUF,
 	/* --pagefault: a kernel entry for new anonymous pages (cpa_pagefault_rmap()) */
 	CPA_CAP_PAGEFAULT,
+	/* bpf_find_vma for perf_event, kprobe and tracepoint: the VMA-bounded stack copy */
+	CPA_CAP_FIND_VMA,
 	CPA_CAP_COUNT,
 };
 

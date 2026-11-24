@@ -72,6 +72,7 @@ const char *cpa_capability_id_name(enum cpa_capability_id id)
 		[CPA_CAP_COREDUMP] = "coredump",
 		[CPA_CAP_RINGBUF] = "ringbuf",
 		[CPA_CAP_PAGEFAULT] = "pagefault",
+		[CPA_CAP_FIND_VMA] = "find_vma",
 	};
 
 	if ((int)id < 0 || id >= CPA_CAP_COUNT)

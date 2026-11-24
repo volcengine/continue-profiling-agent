@@ -262,6 +262,28 @@ static int probe_pagefault(void)
 	return rmap->error ? -rmap->error : 0;
 }
 
+/*
+ * bpf_find_vma (5.17, and backports) for every program type of the capture
+ * object that uses it: perf_event (timer), kprobe (probe, coredump, exit)
+ * and tracepoint.  Only then is the VMA-bounded stack copy loaded.
+ */
+static int probe_find_vma(void)
+{
+	static const enum bpf_prog_type types[] = {
+		BPF_PROG_TYPE_PERF_EVENT,
+		BPF_PROG_TYPE_KPROBE,
+		BPF_PROG_TYPE_TRACEPOINT,
+	};
+	int ret;
+
+	for (size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+		ret = libbpf_probe_bpf_helper(types[i], BPF_FUNC_find_vma, NULL);
+		if (ret != 1)
+			return ret;
+	}
+	return 1;
+}
+
 static int libbpf_probe(enum cpa_capability_id id, void *ctx)
 {
 	int denied = *(const int *)ctx;
@@ -289,6 +311,8 @@ static int libbpf_probe(enum cpa_capability_id id, void *ctx)
 		return libbpf_probe_bpf_map_type(BPF_MAP_TYPE_RINGBUF, NULL);
 	case CPA_CAP_PAGEFAULT:
 		return probe_pagefault();
+	case CPA_CAP_FIND_VMA:
+		return probe_find_vma();
 	case CPA_CAP_COUNT:
 		break;
 	}

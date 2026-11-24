@@ -3,6 +3,7 @@
 
 #include <stack_capture.skel.h>
 #include <stack_capture_ringbuf.skel.h>
+#include <stack_capture_ringbuf_vma.skel.h>
 #include <stack_capture_lite.skel.h>
 #include <stack_capture_pagefault.skel.h>
 #include <linux/perf_event.h>
@@ -40,6 +41,8 @@ static struct stack_capture_lite_bpf *lite_obj;
 static struct stack_capture_pagefault_bpf *pf_obj;
 static struct bpf_object *sc_obj;
 static bool use_ringbuf;
+/* the ringbuf object loaded is the build bounding the stack copy by its VMA */
+static bool use_stack_vma_bound;
 static bool use_lite;
 static bool pf_requested;
 static struct stack_capture_pagefault_cfg pf_request;
@@ -223,11 +226,50 @@ static bool get_stack_supported(void)
 	       cpa_capability_supported(caps, CPA_CAP_GET_STACK_TRACEPOINT);
 }
 
-static int load_ringbuf(const struct bpf_object_open_opts *optsp)
+/*
+ * Test hook: keep the unbounded stack copy where bpf_find_vma exists, to
+ * compare both paths on one kernel.
+ */
+static bool stack_vma_bound_disabled(void)
+{
+	const char *value = getenv("CPA_DISABLE_STACK_VMA_BOUND");
+
+	return value && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
+/*
+ * The VMA-bounded build has the maps and programs of the ringbuf object, so
+ * it opens into the ringbuf skeleton with only its ELF swapped; a mismatch
+ * fails bpf_object__open_skeleton, never binds the wrong map.
+ */
+static struct stack_capture_ringbuf_bpf *open_ringbuf(const struct bpf_object_open_opts *optsp, bool vma_bound)
+{
+	struct stack_capture_ringbuf_bpf *o;
+	int err;
+
+	if (!vma_bound)
+		return stack_capture_ringbuf_bpf__open_opts(optsp);
+	o = calloc(1, sizeof(*o));
+	if (!o)
+		return NULL;
+	err = stack_capture_ringbuf_bpf__create_skeleton(o);
+	if (!err) {
+		o->skeleton->data = (void *)stack_capture_ringbuf_vma_bpf__elf_bytes(&o->skeleton->data_sz);
+		err = bpf_object__open_skeleton(o->skeleton, optsp);
+	}
+	if (err) {
+		stack_capture_ringbuf_bpf__destroy(o);
+		errno = -err;
+		return NULL;
+	}
+	return o;
+}
+
+static int load_ringbuf(const struct bpf_object_open_opts *optsp, bool vma_bound)
 {
 	int ret;
 
-	rb_obj = stack_capture_ringbuf_bpf__open_opts(optsp);
+	rb_obj = open_ringbuf(optsp, vma_bound);
 	if (!rb_obj)
 		return -1;
 	sc_preload_resize(rb_obj->obj, true);
@@ -353,7 +395,15 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 	}
 
 	if (!sc_obj && try_ringbuf) {
-		ret = load_ringbuf(optsp);
+		use_stack_vma_bound = !stack_vma_bound_disabled() &&
+				      cpa_capability_supported(cpa_capabilities_get(), CPA_CAP_FIND_VMA);
+		ret = load_ringbuf(optsp, use_stack_vma_bound);
+		if (ret && use_stack_vma_bound) {
+			BPF_WARN("stack_capture: the VMA-bounded ringbuf object did not load (%d), "
+				 "using the unbounded stack copy\n", ret);
+			use_stack_vma_bound = false;
+			ret = load_ringbuf(optsp, false);
+		}
 		if (ret && datapath_requested == 2) {
 			BPF_ERR("ringbuf bpf load failed ret=%d\n", ret);
 			return ret;
@@ -405,10 +455,12 @@ static int init_bpf_module(const struct bpf_object_open_opts *optsp)
 	}
 	perf_output_events = use_ringbuf ? sc_map_fd("events_rb")
 				       : sc_map_fd("perf_output_events");
-	BPF_INFO("stack_capture object=%s datapath=%s ring_size=%u\n",
+	/* what this session samples with, always logged */
+	fprintf(stderr, "[BPF] stack_capture object=%s datapath=%s ring_size=%u user_stack_copy=%s\n",
 		 pf_obj ? "pagefault" : use_lite ? "lite" : "full",
 		 use_ringbuf ? "ringbuf" : "perfbuf",
-		 use_ringbuf ? ring_size_bytes : 0);
+		 use_ringbuf ? ring_size_bytes : 0,
+		 use_stack_vma_bound ? "vma_bound" : "unbounded");
 	return 0;
 }
 
@@ -466,6 +518,7 @@ static void exit_bpf_module(void)
 	}
 	sc_obj = NULL;
 	use_ringbuf = false;
+	use_stack_vma_bound = false;
 	use_lite = false;
 	stacks_fd = -1;
 	target_pids_fd = -1;

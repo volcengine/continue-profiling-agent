@@ -27,6 +27,7 @@ CAPABILITIES = [
     "coredump",
     "ringbuf",
     "pagefault",
+    "find_vma",
 ]
 
 HARNESS = r"""
