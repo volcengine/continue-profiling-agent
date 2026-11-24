@@ -116,7 +116,7 @@ sudo pahole --btf_encode_detached=/etc/cpa/vmlinux.btf \
 
 ## Release 安装脚本
 
-GitHub Release 发布后，可以直接安装 Linux x86_64 portable 包：
+安装最新 Release 的 portable 包（Linux x86_64 或 arm64，按 `uname -m` 自动选择）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
@@ -125,10 +125,10 @@ curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent
 安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.2.0
 ```
 
-安装脚本会从 GitHub Releases 下载 `cpa_portable-linux-x86_64`，然后调用
+安装脚本会从 GitHub Releases 下载 `cpa_portable-linux-x86_64` 或 `cpa_portable-linux-arm64`，然后调用
 `tools/deploy_cpa.sh`。部署参数可以追加在 `--` 后面，例如 `--no-start`、
 `--freq`、`--store-dir` 或 `--btf`。
 

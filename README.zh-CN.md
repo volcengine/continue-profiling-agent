@@ -33,6 +33,9 @@ CPA 提供以下命令：
 
 - 基于 BPF 或 perf 的持续 on-CPU profiling
 - off-CPU 采集
+- 按进程名、可执行文件、cgroup 或容器选择进程，在 BPF 里完成
+- 崩溃和非零退出时的调用栈
+- 按分配调用栈看常驻内存（`--pagefault`）
 - 基于 probe 的内核栈触发采集
 - `store_dir` 下的持久化与目录轮转
 - `cpa show` 导出 flamegraph
@@ -113,7 +116,7 @@ curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent
 
 ## 手动部署
 
-GitHub Release 发布后，可以直接安装 Linux x86_64 portable 包：
+安装最新 Release 的 portable 包（Linux x86_64 或 arm64，按 `uname -m` 自动选择）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
@@ -122,7 +125,7 @@ curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent
 安装指定 release tag：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.2.0
 ```
 
 如果使用本地构建产物，建议使用 systemd 托管 CPA，可以直接使用部署脚本：
@@ -255,8 +258,11 @@ taskset -c 0 libs/libgunwinder/bin/cfi_bench \
 - `--persistent_day, -P <DAYS>`：只保留最近 N 天的持续采集目录。
 - `--oneshot`：不做目录轮转，只输出一个 flamegraph profile。需要 BPF 后端。
 - `--output_prof, -o <PATH>`：one-shot 模式输出路径，默认 `cpa.prof`。
-- `--pid, -p <PID>`：只采集指定 pid。需要 BPF 后端。
-- `--comm, -n <NAME>`：按 comm/group-comm 过滤采集对象。需要 BPF 后端。
+- `--pid, -p <LIST>`：采集这些进程（逗号分隔，最多 16 个）。需要 BPF 后端。
+- `--comm, -n <LIST>`：采集名字是其中之一的进程（最多 8 个），在进程启动或 exec 时匹配。
+- `--thread_comm <NAME>`：采集这个名字的线程，可单独用，也可配合一个 `--pid`。
+- `--exe <LIST>`、`--cgroup <LIST>`（配合 `--cgroup_recursive`）、`--container_pid <PID>`：按可执行文件、cgroup 或容器选择。
+- `--children`、`--new_only`、`--first_match`、`--startup_window <SEC>`：连带子孙进程、只选新启动的、只选第一个匹配的、或每个进程只采选中后的一段时间。见 docs/zh-CN/usage.md。
 - `--kernel_stack, -K`：只采集内核态栈。需要 BPF 后端。
 - `--offcpu, -u`：采集 off-CPU 样本，只能与 BPF 后端一起使用。
 - `--probe <SPEC>`：仅在指定 probe 触发时采集栈，采用 bpftrace 风格语法，例如 `kprobe:try_to_free_pages`。
@@ -266,7 +272,10 @@ taskset -c 0 libs/libgunwinder/bin/cfi_bench \
 - `--record_env_name, -R <LIST>`：把这些环境变量键写入 metadata，供 `cpa show` 后续过滤。
 - `--parse_env_values, -V <LIST>`：只对环境变量值匹配该列表的进程做用户态展开。
 - `--enable_coredump_capture`：进程 core dump 时记录它的调用栈，只用于 BPF on-CPU。
+- `--datapath <auto|ringbuf|perfbuf>`、`--ring_size_mb <MB>`：样本传输方式；`auto` 在内核支持时用 ring buffer。
+- `--bpf_exec_time_guard_ms <MS>`：用户栈拷贝超过这个时间就中止，并限制该 comm；0 表示关闭。
 - `--enable_exit_capture`：为每个被选中、以非零状态结束的进程记录一条调用栈；需要 `--exit_comm`、`--exit_pid` 或进程选择；`--exit_target_env_*` 只保留环境变量满足条件的进程。见 docs/zh-CN/usage.md。
+- `--exit_comm`、`--exit_pid`、`--exit_target_env_name`、`--exit_target_env_values`、`--exit_target_env_value_prefix`：退出栈采集记录哪些进程。
 - `--pagefault`：按分配调用栈采集一个进程的常驻匿名内存（单位字节，每秒一个存活集合；`--pid` 或规则加 `--first_match`）；`--pf_sample_pages <N>` 页 N 取 1（默认 16）。Linux 5.4 - 5.18 及 6.3+。见 docs/zh-CN/usage.md。
 - `--max_queue_size, -m <N>`：内存中 stack event 队列的上限。
 - `--force_fp`：只用帧指针回溯用户栈，不走 DWARF（4.18 以前忽略）。
@@ -287,6 +296,7 @@ taskset -c 0 libs/libgunwinder/bin/cfi_bench \
 - `--output_prof, -o <PATH>`：flamegraph 输出路径。不显式指定时间时，
   导出会从第一个匹配 record 开始；未指定输出路径时自动生成
   `cpa_<time>_<n>.prof`。
+- `--list_core`、`--list_exit`：列出 coredump 或非零退出的样本及其调用栈，而不是火焰图；`--core_verbose`、`--core_container_pid`、`--core_debug_dir` 用于解析源码行和容器内路径。
 - `--show_range, -p`：打印可用 record 时间范围后退出。
 - `--use_cui, -G`：打开内嵌 Rust `cpa_show` 终端界面。
 - `--use_cache, -u`：复用 `decompressed/` 下的中间文件，不重复解压。

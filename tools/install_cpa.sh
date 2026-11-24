@@ -21,10 +21,11 @@ because the deploy helper writes systemd,
 /etc/cpa, /usr/local, and /var/log/cpa by default.
 
 Options:
-  --version TAG          release tag to install, for example v1.0.0
+  --version TAG          release tag to install, for example v1.2.0
                          (default: latest release)
   --repo OWNER/REPO      GitHub repository (default: volcengine/continue-profiling-agent)
-  --asset NAME           release asset name (default: cpa_portable-linux-x86_64)
+  --asset NAME           release asset name (default: cpa_portable-linux-x86_64,
+                         cpa_portable-linux-arm64 on arm64)
   --btf PATH             custom BTF file passed to deploy_cpa.sh
   --store-dir DIR        profile store root passed to deploy_cpa.sh
   --freq HZ              sampling frequency passed to deploy_cpa.sh
@@ -111,6 +112,7 @@ fi
 if [[ "$uninstall" != "1" ]]; then
 	case "$(uname -m)" in
 	x86_64|amd64) default_asset="cpa_portable-linux-x86_64" ;;
+	aarch64|arm64) default_asset="cpa_portable-linux-arm64" ;;
 	*)
 		echo "unsupported architecture for prebuilt CPA release: $(uname -m)" >&2
 		exit 1

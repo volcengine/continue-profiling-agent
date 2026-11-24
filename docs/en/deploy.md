@@ -121,8 +121,8 @@ helper, pass the same file to
 
 ## Release Installer
 
-After a GitHub release is published, install the portable Linux x86_64 package
-with:
+Install the portable package of the latest release (Linux x86_64 or arm64,
+picked from `uname -m`) with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
@@ -131,10 +131,11 @@ curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent
 To pin a version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.2.0
 ```
 
-The installer downloads `cpa_portable-linux-x86_64` from GitHub Releases and
+The installer downloads `cpa_portable-linux-x86_64` or `cpa_portable-linux-arm64`
+from GitHub Releases and
 then calls `tools/deploy_cpa.sh`. Pass deployment options after `--`, for
 example `--no-start`, `--freq`, `--store-dir`, or `--btf`.
 

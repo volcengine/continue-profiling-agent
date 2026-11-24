@@ -37,6 +37,9 @@ CPA has these commands:
 
 - continuous on-CPU profiling through BPF or perf backends
 - off-CPU collection
+- process selection by name, executable, cgroup or container, done in BPF
+- crash and non-zero exit stacks
+- resident memory by allocating stack (`--pagefault`)
 - probe-triggered stack capture
 - persistent store rotation under `store_dir`
 - flamegraph export through `cpa show`
@@ -126,8 +129,8 @@ See [docs/en/usage.md](docs/en/usage.md) for more examples.
 
 ## Manual Deployment
 
-After a GitHub release is published, install the portable Linux x86_64 package
-with:
+Install the portable package of the latest release (Linux x86_64 or arm64,
+picked from `uname -m`) with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash
@@ -136,7 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent
 To install a specific release tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/volcengine/continue-profiling-agent/refs/heads/main/tools/install_cpa.sh | sudo bash -s -- --version v1.2.0
 ```
 
 For a locally built systemd-managed installation, use the deployment helper:
@@ -274,8 +277,11 @@ Shared generic options:
 - `--persistent_day, -P <DAYS>`: retain only the latest N days of continuous stores.
 - `--oneshot`: write a single flamegraph profile instead of rotating store directories. Requires the BPF backend.
 - `--output_prof, -o <PATH>`: output path for one-shot mode. Default: `cpa.prof`.
-- `--pid, -p <PID>`: capture one target pid. Requires the BPF backend.
-- `--comm, -n <NAME>`: capture tasks matching one comm/group-comm name. Requires the BPF backend.
+- `--pid, -p <LIST>`: sample these processes (comma separated, at most 16). Requires the BPF backend.
+- `--comm, -n <LIST>`: sample processes with one of these names (at most 8), matched when a process starts or execs.
+- `--thread_comm <NAME>`: sample threads with this name, alone or with a single `--pid`.
+- `--exe <LIST>`, `--cgroup <LIST>` (with `--cgroup_recursive`), `--container_pid <PID>`: select by executable, cgroup or container.
+- `--children`, `--new_only`, `--first_match`, `--startup_window <SEC>`: also take descendants, only new processes, only the first match, or each process for a window after it is selected. See docs/en/usage.md.
 - `--kernel_stack, -K`: capture kernel-space stacks only. Requires the BPF backend.
 - `--offcpu, -u`: collect off-CPU samples. Only valid on the BPF backend.
 - `--probe <SPEC>`: capture stacks only when a probe fires, using bpftrace-style syntax such as `kprobe:try_to_free_pages`.
@@ -293,7 +299,10 @@ Shared generic options:
 - `--log_print_cycles <N>`: print local runtime statistics every N timer cycles.
 - `--bench`: print per-stat-interval final-DWARF-path benchmark statistics, including measured sample count, actual unwind rate, average/min/max latency, and fixed latency buckets. `FP_BETTER` samples are excluded. Cold symbol/CFI loading can appear in the first few intervals.
 - `--enable_coredump_capture`: record the stack of a process that dumps core. BPF on-CPU only.
+- `--datapath <auto|ringbuf|perfbuf>`, `--ring_size_mb <MB>`: sample transport; `auto` uses the ring buffer where the kernel has it.
+- `--bpf_exec_time_guard_ms <MS>`: abort a user-stack copy that runs longer and throttle that comm; 0 disables.
 - `--enable_exit_capture`: record one stack per selected process that ends non-zero; needs `--exit_comm`, `--exit_pid` or a process selection; `--exit_target_env_*` keep only processes whose environment matched. See docs/en/usage.md.
+- `--exit_comm`, `--exit_pid`, `--exit_target_env_name`, `--exit_target_env_values`, `--exit_target_env_value_prefix`: which processes exit capture records.
 - `--pagefault`: profile one process's resident anonymous memory by allocating stack (values in bytes, one live set per second; `--pid` or rules with `--first_match`); `--pf_sample_pages <N>` samples 1 in N pages (default 16). Linux 5.4 - 5.18 and 6.3+. See docs/en/usage.md.
 - `--debug_option <PID,FREQ,PATH>`: debug capture override in `{pid},{sample_freq},{dump_path}` form.
 
@@ -306,6 +315,7 @@ Shared generic options:
 - `--output_prof, -o <PATH>`: flamegraph output path. Without explicit time
   options, export starts from the first matching record. If omitted, CPA
   generates `cpa_<time>_<n>.prof`.
+- `--list_core`, `--list_exit`: list coredump or non-zero-exit samples with their frames instead of a flamegraph; `--core_verbose`, `--core_container_pid`, `--core_debug_dir` resolve source lines and container paths.
 - `--show_range, -p`: print the available record time range and exit.
 - `--use_cui, -G`: open the embedded Rust `cpa_show` terminal UI.
 - `--use_cache, -u`: reuse files under `decompressed/` instead of re-decompressing them.
