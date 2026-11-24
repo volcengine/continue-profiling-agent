@@ -62,9 +62,10 @@ def fp_app(tmp_path_factory) -> Path:
         pytest.skip("gcc is required to build the workload")
     d = tmp_path_factory.mktemp("force_fp")
     (d / "fp_app.c").write_text(textwrap.dedent(APP))
-    # -O0: every function sets up its frame (some compilers drop a leaf's
-    # frame pointer even with -fno-omit-frame-pointer)
-    subprocess.run([cc, "-O0", "-g", "-fno-omit-frame-pointer",
+    # -O0 and a leaf frame pointer: every function sets up its frame record
+    # (compilers drop a leaf's even with -fno-omit-frame-pointer, and on
+    # arm64 a leaf without one hides its caller from the frame-pointer chain)
+    subprocess.run([cc, "-O0", "-g", "-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer",
                     "-o", str(d / "fp_app"), str(d / "fp_app.c")], check=True, timeout=120)
     return d / "fp_app"
 

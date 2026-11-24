@@ -52,6 +52,8 @@ Requires libgunwinder 2.0 (the bundled submodule).
   kernels in `do_exit`).
 - A stack whose interning or counting fails no longer leaks its frames into
   the next one.
+- arm64: a sample in a leaf function that saved nothing no longer loses the
+  leaf's caller (libgunwinder).
 - `--children` also selects descendants already running at start.
 - The `--bench` histogram has a bucket for 4096 us and more.
 - BPF objects are rebuilt when a header they include changes.

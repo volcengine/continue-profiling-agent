@@ -37,8 +37,10 @@ Useful options:
   environment values
 - `--force_fp`: unwind user stacks by frame pointers only, never DWARF:
   cheaper per sample for code built with frame pointers, but a frame without
-  one ends or skips the stack. Ignored, saying so, on kernels without
-  `bpf_get_stack` (before 4.18)
+  one ends or skips the stack. On arm64 a leaf function has no frame record
+  unless built with `-mno-omit-leaf-frame-pointer`, so a sample in it loses
+  the leaf's caller. Ignored, saying so, on kernels without `bpf_get_stack`
+  (before 4.18)
 - `--bench`: print per-stat-interval final-DWARF-path benchmark statistics,
   including actual unwind count, rate, average/min/max latency, and fixed
   latency buckets. `FP_BETTER` samples are excluded. Initial symbol/CFI cold
