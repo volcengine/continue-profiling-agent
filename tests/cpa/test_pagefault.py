@@ -167,7 +167,7 @@ def test_kernels_before_5_4_are_refused_with_the_reason() -> None:
     body = _section(_read(GLUE), "int cpa_pagefault_configure(", "\n}\n")
     assert body.index("if (!pf.enabled)") < body.index("rmap->entry == CPA_PF_ENTRY_NONE") < \
         body.index("pf_sample_pages")
-    assert e2e.kernel_before_5_4("4.14.81.bm.22-amd64")
+    assert e2e.kernel_before_5_4("4.14.81-amd64")
     assert e2e.kernel_before_5_4("4.19.117-amd64")
     assert not e2e.kernel_before_5_4("5.4.56-amd64")
     assert not e2e.kernel_before_5_4("5.15.152-amd64")
