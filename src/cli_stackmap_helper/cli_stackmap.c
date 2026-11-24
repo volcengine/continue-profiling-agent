@@ -81,7 +81,7 @@ void cli_stackmap_print(struct cli_stackmap *map)
 
 	for (int i = 0; i < entry->ids_len; i++) {
 		uint32_t id = entry->ids[i];
-		struct str_hash *str = map->str_hash_by_id[id];
+		struct stackmap_str_rec *str = map->str_rec_by_id[id];
 		if (str) {
 			CLI_OUTPUT(" - %s", str->str);
 		}
@@ -107,18 +107,22 @@ struct cli_stackmap *cli_stackmap_init(void)
 	}
 
 	map->str_id = 1;
-	map->str_hash_maxlen = DEFAULT_IDS_LEN;
-	map->str_hash_by_id = calloc(DEFAULT_IDS_LEN, sizeof(struct str_hash *));
-	if (!map->str_hash_by_id) {
-		CLI_ERROR("cli_stackmap_entry_init: malloc str_hash failed\n");
+	map->str_rec_maxlen = DEFAULT_IDS_LEN;
+	map->str_rec_by_id = calloc(DEFAULT_IDS_LEN, sizeof(*map->str_rec_by_id));
+	map->str_index = stackmap_intern_index_create();
+	map->str_arena = stackmap_arena_create();
+	if (!map->str_rec_by_id || !map->str_index || !map->str_arena) {
+		CLI_ERROR("cli_stackmap_entry_init: malloc string table failed\n");
 		goto clear;
 	}
 
 	map->ids_id = 1;
-	map->ids_hash_maxlen = DEFAULT_IDS_LEN;
-	map->ids_hash_by_id = calloc(DEFAULT_IDS_LEN, sizeof(struct ids_hash *));
-	if (!map->ids_hash_by_id) {
-		CLI_ERROR("cli_stackmap_entry_init: malloc ids_hash failed\n");
+	map->ids_rec_maxlen = DEFAULT_IDS_LEN;
+	map->ids_rec_by_id = calloc(DEFAULT_IDS_LEN, sizeof(*map->ids_rec_by_id));
+	map->ids_index = stackmap_intern_index_create();
+	map->ids_arena = stackmap_arena_create();
+	if (!map->ids_rec_by_id || !map->ids_index || !map->ids_arena) {
+		CLI_ERROR("cli_stackmap_entry_init: malloc stack table failed\n");
 		goto clear;
 	}
 
@@ -159,10 +163,14 @@ clear:
 		pthread_mutex_destroy(&map->id_count_lock);
 	if (map && map->current)
 		cli_stackmap_entry_destroy(map->current);
-	if (map && map->str_hash_by_id)
-		free(map->str_hash_by_id);
-	if (map && map->ids_hash_by_id)
-		free(map->ids_hash_by_id);
+	if (map) {
+		free(map->str_rec_by_id);
+		stackmap_intern_index_destroy(map->str_index);
+		stackmap_arena_destroy(map->str_arena);
+		free(map->ids_rec_by_id);
+		stackmap_intern_index_destroy(map->ids_index);
+		stackmap_arena_destroy(map->ids_arena);
+	}
 	if (map && map->count_table)
 		stackmap_count_table_destroy(map->count_table);
 	if (map && map->usage)
@@ -174,8 +182,6 @@ clear:
 
 void cli_stackmap_destroy(struct cli_stackmap *map)
 {
-	struct str_hash *p, *tmp;
-	struct ids_hash *p_id, *tmp_id;
 	struct id_count *p_count, *tmp_count;
 
 	if (!map)
@@ -194,29 +200,23 @@ void cli_stackmap_destroy(struct cli_stackmap *map)
 	stackmap_timewheel_destroy(map->timewheel);
 	stackmap_count_table_destroy(map->count_table);
 
-	HASH_ITER (hh, map->str_hash, p, tmp) {
-		HASH_DEL(map->str_hash, p);
-		free(p->str);
-		free(p);
-	}
+	stackmap_intern_index_destroy(map->str_index);
+	stackmap_arena_destroy(map->str_arena);
 
 	HASH_ITER (hh, map->id_count, p_count, tmp_count) {
 		HASH_DEL(map->id_count, p_count);
 		free(p_count);
 	}
 
-	HASH_ITER (hh, map->ids_hash, p_id, tmp_id) {
-		HASH_DEL(map->ids_hash, p_id);
-		free(p_id);
-	}
+	stackmap_intern_index_destroy(map->ids_index);
+	stackmap_arena_destroy(map->ids_arena);
+	free(map->ids_key);
 
 	if (map->current)
 		cli_stackmap_entry_destroy(map->current);
 
-	if (map->str_hash_by_id)
-		free(map->str_hash_by_id);
-	if (map->ids_hash_by_id)
-		free(map->ids_hash_by_id);
+	free(map->str_rec_by_id);
+	free(map->ids_rec_by_id);
 	if (map->usage)
 		free(map->usage);
 
@@ -256,13 +256,61 @@ uint64_t cli_stackmap_now_record_ms(struct cli_stackmap *map)
 	return get_current_ms() - map->day_start;
 }
 
+static bool str_index_eq(uint32_t id, const void *key, size_t key_len, void *ctx)
+{
+	struct cli_stackmap *map = ctx;
+	struct stackmap_str_rec *str;
+
+	if (id >= map->str_rec_maxlen)
+		return false;
+	str = map->str_rec_by_id[id];
+	return str && str->len == key_len && memcmp(str->str, key, key_len) == 0;
+}
+
+static bool ids_index_eq(uint32_t id, const void *key, size_t key_len, void *ctx)
+{
+	struct cli_stackmap *map = ctx;
+	const uint8_t *payload;
+	size_t payload_len;
+
+	if (id >= map->ids_rec_maxlen || !map->ids_rec_by_id[id])
+		return false;
+	payload = stackmap_ids_payload(map->ids_rec_by_id[id], &payload_len);
+	return payload_len == key_len && memcmp(payload, key, key_len) == 0;
+}
+
+/* Grow the id -> record array of @lock to hold @id. */
+static int ensure_by_id_capacity(void **arr, uint32_t *maxlen, uint32_t id, pthread_mutex_t *lock)
+{
+	uint32_t old_maxlen = *maxlen, new_maxlen = old_maxlen;
+	void **new_arr;
+
+	if (id < old_maxlen)
+		return 0;
+	while (id >= new_maxlen)
+		new_maxlen *= 2;
+	pthread_mutex_lock(lock);
+	new_arr = realloc(*arr, new_maxlen * sizeof(void *));
+	if (new_arr) {
+		memset(new_arr + old_maxlen, 0, (new_maxlen - old_maxlen) * sizeof(void *));
+		*arr = new_arr;
+		*maxlen = new_maxlen;
+	}
+	pthread_mutex_unlock(lock);
+	if (!new_arr) {
+		CLI_ERROR("fatal: realloc id table failed\n");
+		return -1;
+	}
+	return 0;
+}
+
 int cli_stackmap_append(struct cli_stackmap *map, const char *stack)
 {
-	struct str_hash *s;
-	int ret = 0;
+	struct stackmap_intern_index_insert insert = { 0 };
+	struct stackmap_str_rec *s;
+	bool found = false;
 	size_t stack_len;
-	char *bounded = NULL;
-	const char *key;
+	uint32_t str_id;
 
 	if (!map) {
 		CLI_ERROR("input map is NULL\n");
@@ -276,63 +324,42 @@ int cli_stackmap_append(struct cli_stackmap *map, const char *stack)
 	if (!map->record_start_time)
 		map->record_start_time = get_current_ms() - map->day_start;
 
+	/* longer frames are cut (see CLI_STACKMAP_FRAME_MAX_LEN) */
 	stack_len = strnlen(stack, CLI_STACKMAP_FRAME_MAX_LEN);
-	if (stack_len == CLI_STACKMAP_FRAME_MAX_LEN) {
-		bounded = strndup(stack, stack_len);
-		if (!bounded) {
-			CLI_ERROR("strndup bounded frame failed\n");
-			return -1;
-		}
-		key = bounded;
+	if (stackmap_intern_index_prepare_insert(map->str_index, stack, stack_len, str_index_eq, map, &insert,
+						 &str_id, &found) != 0) {
+		CLI_ERROR("prepare stack string insert failed\n");
+		return -1;
+	}
+
+	if (found) {
+		s = map->str_rec_by_id[str_id];
 	} else {
-		key = stack;
-	}
-
-	HASH_FIND(hh, map->str_hash, key, stack_len, s);
-	if (!s) {
-		s = calloc(1, sizeof(struct str_hash));
+		s = stackmap_arena_alloc(map->str_arena, sizeof(*s) + stack_len + 1, _Alignof(struct stackmap_str_rec));
 		if (!s) {
-			CLI_ERROR("malloc str_hash failed\n");
-			free(bounded);
+			CLI_ERROR("malloc stack string failed\n");
 			return -1;
 		}
+		s->len = (uint32_t)stack_len;
+		s->id = map->str_id;
+		memcpy(s->str, stack, stack_len);
+		s->str[stack_len] = '\0';
 
-		s->str = bounded ? bounded : strdup(stack);
-		if (!s->str) {
-			CLI_ERROR("strdup frame failed\n");
-			free(s);
-			free(bounded);
+		if (ensure_by_id_capacity((void **)&map->str_rec_by_id, &map->str_rec_maxlen, s->id,
+					  &map->strmap_lock) != 0) {
+			stackmap_arena_unalloc(map->str_arena, s);
 			return -1;
 		}
-		bounded = NULL; /* stolen into s->str */
-		map->usage->memory_usage_strmap += stack_len + sizeof(struct str_hash);
-		s->id = map->str_id++;
-
-		HASH_ADD_KEYPTR(hh, map->str_hash, s->str, stack_len, s);
-
-		if (s->id >= map->str_hash_maxlen) {
-			pthread_mutex_lock(&map->strmap_lock);
-			int old_maxlen = map->str_hash_maxlen;
-			while (s->id >= map->str_hash_maxlen)
-				map->str_hash_maxlen *= 2;
-			struct str_hash **new_arr = realloc(map->str_hash_by_id, map->str_hash_maxlen * sizeof(struct str_hash *));
-			if (!new_arr) {
-				pthread_mutex_unlock(&map->strmap_lock);
-				CLI_ERROR("fatal: realloc str_hash_by_id failed\n");
-				return -1;
-			}
-			map->str_hash_by_id = new_arr;
-			memset(map->str_hash_by_id + old_maxlen, 0, (map->str_hash_maxlen - old_maxlen) * sizeof(struct str_hash *));
-			pthread_mutex_unlock(&map->strmap_lock);
+		map->str_rec_by_id[s->id] = s;
+		if (stackmap_intern_index_commit_insert(map->str_index, &insert, s->id) != 0) {
+			map->str_rec_by_id[s->id] = NULL;
+			stackmap_arena_unalloc(map->str_arena, s);
+			return -1;
 		}
-
-		map->str_hash_by_id[s->id] = s;
+		map->str_id++;
 	}
 
-	free(bounded);
-
-	ret = cli_stackmap_entry_append_id(map, map->current, s->id);
-	if (ret) {
+	if (cli_stackmap_entry_append_id(map, map->current, s->id)) {
 		CLI_ERROR("append id to current stackmap_entry failed\n");
 		return -1;
 	}
@@ -377,48 +404,61 @@ void new_id_count(struct cli_stackmap *map, uint32_t id, uint64_t count)
 	pthread_mutex_unlock(&map->id_count_lock);
 }
 
-static struct ids_hash *new_ids_hash(struct cli_stackmap *map, uint32_t *ids, int len)
+/* The current entry encoded into map->ids_key (the payload of its record). */
+static int encode_current_ids(struct cli_stackmap *map, size_t *key_len)
 {
-	size_t ids_alloc_size = sizeof(struct ids_hash) + len * sizeof(uint32_t);
-	struct ids_hash *ids_hash = calloc(1, ids_alloc_size);
-	uint32_t id = map->ids_id;
+	uint32_t ids_len = map->current->ids_len;
+	size_t need = (size_t)ids_len * STACKMAP_IDS_VARINT_MAX;
 
-	if (!ids_hash)
+	/* allocated even for an empty stack: memcmp() takes no NULL */
+	if (need > map->ids_key_cap || !map->ids_key) {
+		size_t cap = map->ids_key_cap ? map->ids_key_cap : 256;
+		uint8_t *key;
+
+		while (cap < need)
+			cap *= 2;
+		key = realloc(map->ids_key, cap);
+		if (!key)
+			return -1;
+		map->ids_key = key;
+		map->ids_key_cap = cap;
+	}
+	*key_len = stackmap_ids_encode(map->ids_key, map->current->ids, ids_len);
+	return 0;
+}
+
+static const uint8_t *new_ids_record(struct cli_stackmap *map, const uint8_t *payload, size_t payload_len,
+				     const struct stackmap_intern_index_insert *insert)
+{
+	uint32_t id = map->ids_id;
+	uint8_t *record;
+	size_t prefix;
+
+	if (ensure_by_id_capacity((void **)&map->ids_rec_by_id, &map->ids_rec_maxlen, id, &map->idsmap_lock) != 0)
 		return NULL;
 
-	/* ensure capacity BEFORE writing by index */
-	if (id >= map->ids_hash_maxlen) {
-		pthread_mutex_lock(&map->idsmap_lock);
-		int old_maxlen = map->ids_hash_maxlen;
-		while (id >= map->ids_hash_maxlen)
-			map->ids_hash_maxlen *= 2;
-		struct ids_hash **new_arr = realloc(map->ids_hash_by_id, map->ids_hash_maxlen * sizeof(struct ids_hash *));
-		if (!new_arr) {
-			pthread_mutex_unlock(&map->idsmap_lock);
-			CLI_ERROR("fatal: realloc ids_hash_by_id failed\n");
-			free(ids_hash);
-			return NULL;
-		}
-		map->ids_hash_by_id = new_arr;
-		memset(map->ids_hash_by_id + old_maxlen, 0, (map->ids_hash_maxlen - old_maxlen) * sizeof(struct ids_hash *));
-		pthread_mutex_unlock(&map->idsmap_lock);
+	prefix = stackmap_ids_varint_len(payload_len);
+	record = stackmap_arena_alloc(map->ids_arena, prefix + payload_len, 1);
+	if (!record)
+		return NULL;
+	stackmap_ids_put_varint(record, payload_len);
+	memcpy(record + prefix, payload, payload_len);
+
+	map->ids_rec_by_id[id] = record;
+	if (stackmap_intern_index_commit_insert(map->ids_index, insert, id) != 0) {
+		map->ids_rec_by_id[id] = NULL;
+		stackmap_arena_unalloc(map->ids_arena, record);
+		return NULL;
 	}
-
-	map->usage->memory_usage_idsmap += ids_alloc_size;
-	ids_hash->ids = (uint32_t *)(ids_hash + 1);
-	ids_hash->id = id;
-	ids_hash->ids_len = len;
-	memcpy(ids_hash->ids, ids, len * sizeof(uint32_t));
-	HASH_ADD_KEYPTR(hh, map->ids_hash, ids_hash->ids, ids_hash->ids_len * sizeof(uint32_t), ids_hash);
-	map->ids_hash_by_id[ids_hash->id] = ids_hash;
 	map->ids_id++;
-
-	return ids_hash;
+	return record;
 }
 
 static int cli_stackmap_intern_current_ids(struct cli_stackmap *map, uint32_t *ids_id)
 {
-	struct ids_hash *ids_hash;
+	struct stackmap_intern_index_insert insert = { 0 };
+	bool found = false;
+	size_t key_len = 0;
 
 	if (!map) {
 		CLI_ERROR("input map is NULL\n");
@@ -433,15 +473,43 @@ static int cli_stackmap_intern_current_ids(struct cli_stackmap *map, uint32_t *i
 		}
 	}
 
-	HASH_FIND(hh, map->ids_hash, map->current->ids, map->current->ids_len * sizeof(uint32_t), ids_hash);
-
-	if (!ids_hash)
-		ids_hash = new_ids_hash(map, map->current->ids, map->current->ids_len);
-	if (!ids_hash)
+	if (encode_current_ids(map, &key_len) != 0) {
+		CLI_ERROR("encode ids failed\n");
 		return -1;
-
-	*ids_id = ids_hash->id;
+	}
+	if (stackmap_intern_index_prepare_insert(map->ids_index, map->ids_key, key_len, ids_index_eq, map, &insert,
+						 ids_id, &found) != 0) {
+		CLI_ERROR("prepare ids insert failed\n");
+		return -1;
+	}
+	if (!found) {
+		*ids_id = map->ids_id;
+		if (!new_ids_record(map, map->ids_key, key_len, &insert)) {
+			CLI_ERROR("new ids record failed\n");
+			return -1;
+		}
+	}
 	return 0;
+}
+
+uint32_t *cli_stackmap_ids_copy(struct cli_stackmap *map, uint32_t ids_id, uint32_t *len)
+{
+	struct stackmap_ids_iter it;
+	uint32_t *ids, n = 0, str_id;
+	size_t payload_len;
+
+	if (!map || !len || ids_id >= map->ids_rec_maxlen || !map->ids_rec_by_id[ids_id])
+		return NULL;
+	/* every frame takes at least one payload byte */
+	stackmap_ids_payload(map->ids_rec_by_id[ids_id], &payload_len);
+	ids = malloc((payload_len ? payload_len : 1) * sizeof(*ids));
+	if (!ids)
+		return NULL;
+	stackmap_ids_iter_init(&it, map->ids_rec_by_id[ids_id]);
+	while (stackmap_ids_iter_next(&it, &str_id))
+		ids[n++] = str_id;
+	*len = n;
+	return ids;
 }
 
 int cli_stackmap_enable_timewheel(struct cli_stackmap *map, uint64_t hold_ms)
@@ -605,7 +673,7 @@ void cli_stackmap_dump_strmap(struct cli_stackmap *map, const char *file_name)
 	int id = map->dumped_str_id;
 	for (id = map->dumped_str_id; id <= map->str_id - 1; id++) {
 		pthread_mutex_lock(&map->strmap_lock);
-		struct str_hash *s = map->str_hash_by_id[id];
+		struct stackmap_str_rec *s = map->str_rec_by_id[id];
 		pthread_mutex_unlock(&map->strmap_lock);
 		if (!s)
 			continue;
@@ -628,19 +696,21 @@ void cli_stackmap_dump_idsmap(struct cli_stackmap *map, const char *file_name)
 		}
 	}
 
-	int i = 0;
-
 	int id = map->dumped_ids_id;
 	for (id = map->dumped_ids_id; id <= map->ids_id - 1; id++) {
 		pthread_mutex_lock(&map->idsmap_lock);
-		struct ids_hash *s = map->ids_hash_by_id[id];
+		const uint8_t *s = map->ids_rec_by_id[id];
 		pthread_mutex_unlock(&map->idsmap_lock);
+		struct stackmap_ids_iter it;
+		uint32_t str_id;
+
 		if (!s)
 			continue;
-		for (i = 0; i < s->ids_len; i++)
-			cli_zstd_write(map->idsmap, "%d;", s->ids[i]);
+		stackmap_ids_iter_init(&it, s);
+		while (stackmap_ids_iter_next(&it, &str_id))
+			cli_zstd_write(map->idsmap, "%d;", str_id);
 
-		cli_zstd_write(map->idsmap, " %d\n", s->id);
+		cli_zstd_write(map->idsmap, " %d\n", id);
 		map->dumped_ids_id = id + 1;
 		cli_zstd_write_done(map->idsmap);
 	}
@@ -884,8 +954,12 @@ struct cli_stackmap_memory_usage *cli_stackmap_get_memory_usage(struct cli_stack
 {
 	if (!map)
 		return NULL;
-	map->usage->memory_usage_strarray = map->str_hash_maxlen * sizeof(void *);
-	map->usage->memory_usage_idsarray = map->ids_hash_maxlen * sizeof(void *);
+	map->usage->memory_usage_strmap = stackmap_arena_memory_usage(map->str_arena);
+	map->usage->memory_usage_idsmap = stackmap_arena_memory_usage(map->ids_arena);
+	map->usage->memory_usage_strarray = map->str_rec_maxlen * sizeof(void *);
+	map->usage->memory_usage_idsarray = map->ids_rec_maxlen * sizeof(void *);
+	map->usage->memory_usage_strindex = stackmap_intern_index_memory_usage(map->str_index);
+	map->usage->memory_usage_idsindex = stackmap_intern_index_memory_usage(map->ids_index);
 	return map->usage;
 }
 

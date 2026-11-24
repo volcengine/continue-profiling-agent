@@ -166,13 +166,16 @@ void cpa_timer_fn(void *worker_ctx)
 			   (unsigned long long)bpf_capture_stat.exit_env_mismatch_drop_count,
 			   (unsigned long long)bpf_capture_stat.exit_env_unknown_drop_count);
 		CLI_OUTPUT("RSS   Anon Size: %ld KB   File Size: %ld KB    Total Size: %ld KB", rss.rss_anon, rss.rss_file, rss.rss_sum);
-		CLI_OUTPUT("Ids Alloc Size : %ld KB   Str Alloc Size: %ld KB Ids Array Size: %ld KB Str Array Size: %ld KB", usage->memory_usage_idsmap / 1024, usage->memory_usage_strmap / 1024, usage->memory_usage_idsarray / 1024,
-			   usage->memory_usage_strarray / 1024);
+		CLI_OUTPUT("Ids Alloc Size : %ld KB   Str Alloc Size: %ld KB Ids Array Size: %ld KB Str Array Size: %ld KB Ids Index Size: %ld KB Str Index Size: %ld KB",
+			   usage->memory_usage_idsmap / 1024, usage->memory_usage_strmap / 1024, usage->memory_usage_idsarray / 1024,
+			   usage->memory_usage_strarray / 1024, usage->memory_usage_idsindex / 1024, usage->memory_usage_strindex / 1024);
 		cpa_print_unwind_bench_stat();
 		cpa_print_bpf_exec_time_dist();
 	}
 
-	if (usage->memory_usage_idsarray + usage->memory_usage_strarray + usage->memory_usage_idsmap + usage->memory_usage_strmap > 1024 * 1024 * cpa_stat.max_cache_size_mb) {
+	if (usage->memory_usage_idsarray + usage->memory_usage_strarray + usage->memory_usage_idsmap + usage->memory_usage_strmap +
+		    usage->memory_usage_idsindex + usage->memory_usage_strindex >
+	    1024 * 1024 * cpa_stat.max_cache_size_mb) {
 		cpa_runtime_need_restart();
 		return;
 	}

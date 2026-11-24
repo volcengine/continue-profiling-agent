@@ -122,9 +122,10 @@ def test_interned_frame_length_is_capped(tmp_path: Path) -> None:
 
                 assert(cli_stackmap_append(map, big) == 0);
                 assert(map->str_id == 2);
-                struct str_hash *first = map->str_hash_by_id[1];
+                struct stackmap_str_rec *first = map->str_rec_by_id[1];
                 assert(first);
                 assert(strlen(first->str) == CLI_STACKMAP_FRAME_MAX_LEN);
+                assert(first->len == CLI_STACKMAP_FRAME_MAX_LEN);
 
                 /* A second over-long frame sharing the 8 KiB prefix dedups. */
                 char *big2 = malloc(big_len + 1);
@@ -141,7 +142,7 @@ def test_interned_frame_length_is_capped(tmp_path: Path) -> None:
                 assert(short_frame);
                 assert(cli_stackmap_append(map, short_frame) == 0);
                 assert(map->str_id == 3);
-                assert(strcmp(map->str_hash_by_id[2]->str, "normal_short_frame") == 0);
+                assert(strcmp(map->str_rec_by_id[2]->str, "normal_short_frame") == 0);
 
                 free(big);
                 free(big2);
@@ -171,6 +172,8 @@ def test_interned_frame_length_is_capped(tmp_path: Path) -> None:
         str(REPO_ROOT / "src/cli_stackmap_helper/cli_stackmap.c"),
         str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_count_table.c"),
         str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_timewheel.c"),
+        str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_arena.c"),
+        str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_intern_index.c"),
         "-o",
         str(binary),
     ]

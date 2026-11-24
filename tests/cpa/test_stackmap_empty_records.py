@@ -211,6 +211,8 @@ def test_empty_stackmap_record_does_not_depend_on_malloc_zero(tmp_path: Path) ->
         str(harness),
         str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_count_table.c"),
         str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_timewheel.c"),
+        str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_arena.c"),
+        str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_intern_index.c"),
         "-o",
         str(binary),
     ]

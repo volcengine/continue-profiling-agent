@@ -193,6 +193,8 @@ def test_fetch_dump_info_skips_guards_and_drops_trailing(tmp_path: Path) -> None
         str(REPO_ROOT / "src/cli_stackmap_helper/cli_stackmap.c"),
         str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_count_table.c"),
         str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_timewheel.c"),
+        str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_arena.c"),
+        str(REPO_ROOT / "src/cli_stackmap_helper/stackmap_intern_index.c"),
         "-o",
         str(binary),
     ]

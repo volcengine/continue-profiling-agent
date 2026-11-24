@@ -15,12 +15,33 @@
 #include <unistd.h>
 
 #include <cli_zstd_helper.h>
+#include "stackmap_arena.h"
 #include "stackmap_count_table.h"
+#include "stackmap_ids_codec.h"
+#include "stackmap_intern_index.h"
 #include "stackmap_timewheel.h"
 
 /**
  * @file cli_stackmap_private.h
  * @brief Internal stackmap storage structures used by shared aggregator helpers.
+ */
+
+/**
+ * struct stackmap_str_rec - a frame string of a live map, in its string arena.
+ * @len: length of @str, without the terminating NUL.
+ * @id: stable frame id.
+ * @str: the string, NUL-terminated.
+ */
+struct stackmap_str_rec {
+	uint32_t len;
+	uint32_t id;
+	char str[];
+};
+
+/*
+ * str_hash and ids_hash are the entries of a store read back
+ * (cli_stackmap_reload()); a live map keeps stackmap_str_rec and
+ * stackmap_ids_codec.h records instead.
  */
 
 /**
@@ -81,14 +102,19 @@ struct cli_stackmap_memory_usage;
  * struct cli_stackmap - mutable stack aggregation container.
  * @current: in-progress stack entry being built.
  * @str_id: next frame string id to allocate.
- * @str_hash: hash table of interned strings by id.
- * @str_hash_by_id: array index for id to string entry mapping.
- * @str_hash_maxlen: allocated size of @str_hash_by_id.
+ * @str_index: string -> id index, over @str_rec_by_id.
+ * @str_arena: storage of the string records.
+ * @str_rec_by_id: id to string record.
+ * @str_rec_maxlen: allocated size of @str_rec_by_id.
  * @dumped_str_id: last dumped string id.
  * @ids_id: next ids id to allocate.
- * @ids_hash: hash table of interned ids arrays.
- * @ids_hash_by_id: array index for id to ids entry mapping.
- * @ids_hash_maxlen: allocated size of @ids_hash_by_id.
+ * @ids_index: encoded stack -> id index, over @ids_rec_by_id.
+ * @ids_arena: storage of the stack records.
+ * @ids_rec_by_id: id to stack record (stackmap_ids_codec.h): read through
+ *                 FOR_EACH_STACKMAP_STR or cli_stackmap_ids_copy().
+ * @ids_rec_maxlen: allocated size of @ids_rec_by_id.
+ * @ids_key: the current entry encoded, the key @ids_index looks up.
+ * @ids_key_cap: allocated size of @ids_key.
  * @dumped_ids_id: last dumped ids id.
  * @idsmap: output stream for ids data.
  * @strmap: output stream for string data.
@@ -107,15 +133,19 @@ struct cli_stackmap {
 	struct cli_stackmap_entry *current;
 
 	uint32_t str_id;
-	struct str_hash *str_hash;
-	struct str_hash **str_hash_by_id;
-	uint32_t str_hash_maxlen;
+	struct stackmap_intern_index *str_index;
+	struct stackmap_arena *str_arena;
+	struct stackmap_str_rec **str_rec_by_id;
+	uint32_t str_rec_maxlen;
 	uint32_t dumped_str_id;
 
 	uint32_t ids_id;
-	struct ids_hash *ids_hash;
-	struct ids_hash **ids_hash_by_id;
-	uint32_t ids_hash_maxlen;
+	struct stackmap_intern_index *ids_index;
+	struct stackmap_arena *ids_arena;
+	const uint8_t **ids_rec_by_id;
+	uint32_t ids_rec_maxlen;
+	uint8_t *ids_key;
+	size_t ids_key_cap;
 	uint32_t dumped_ids_id;
 
 	ZSTDStream *idsmap;

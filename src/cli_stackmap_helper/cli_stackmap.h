@@ -26,6 +26,9 @@ struct cli_stackmap_memory_usage {
 	uint64_t memory_usage_idsmap;
 	uint64_t memory_usage_strarray;
 	uint64_t memory_usage_idsarray;
+	/* the string and stack indexes (open addressing, ids and hashes only) */
+	uint64_t memory_usage_strindex;
+	uint64_t memory_usage_idsindex;
 };
 
 /**
@@ -315,9 +318,20 @@ void cli_stackmap_split(struct stackmap_record *records, int num, const char *so
  * @_id: ids identifier.
  * @_str: resolved frame string for current iteration.
  */
-#define FOR_EACH_STACKMAP_STR(_map, _id, _str)                                                                                                                                                                                                                 \
-	struct ids_hash *_ids = (_map)->ids_hash_by_id[_id];                                                                                                                                                                                                   \
-	int _sm_i;                                                                                                                                                                                                                                             \
-	for (_sm_i = 0; _sm_i < (_ids)->ids_len && ((_str) = (_map)->str_hash_by_id[(_ids)->ids[_sm_i]]->str); _sm_i++)
+#define FOR_EACH_STACKMAP_STR(_map, _id, _str)                       \
+	struct stackmap_ids_iter _sm_it;                             \
+	uint32_t _sm_str_id;                                         \
+	stackmap_ids_iter_init(&_sm_it, (_map)->ids_rec_by_id[_id]); \
+	while (stackmap_ids_iter_next(&_sm_it, &_sm_str_id) && ((_str) = (_map)->str_rec_by_id[_sm_str_id]->str))
+
+/**
+ * cli_stackmap_ids_copy - the string ids of one stack of a live map.
+ * @map: source stackmap.
+ * @ids_id: the stack.
+ * @len: set to the number of ids.
+ *
+ * Return: a malloc()ed array of *@len ids, or %NULL when there is no such stack.
+ */
+uint32_t *cli_stackmap_ids_copy(struct cli_stackmap *map, uint32_t ids_id, uint32_t *len);
 
 #endif
