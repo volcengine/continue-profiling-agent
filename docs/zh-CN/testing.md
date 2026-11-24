@@ -72,6 +72,8 @@ pytest -q tests/cpa
   - `--exit_comm` / `--exit_pid` / `--exit_target_env_*` 的解析与报错；env 存储读真实子进程（精确与前缀匹配、取第一个设了值的名字、都没设、进程已退出、按实例、读线程），普通、ASan/UBSan、TSan 各跑一遍
 - `tests/cpa/test_exit_capture_e2e.py`（`tests/cpa/exit_capture/`）
   - 1 个和 4 个回溯线程下，`exit_app` 的副本各走一条退出路径：工作线程 exit_group、leader pthread_exit 后工作线程退出或被 SIGKILL、SIGTERM、并发 exit_group（只记一条）、SIGSEGV、exit 0 和裸 SYS_exit（不记）、exec（不记）、与 coredump 同开（只有 COREDUMP）、`--exit_comm` / `--exit_pid` / `--exit_target_env_*`（启动扫描、exec、fork、不满足、读不到、4.14 exec 回退）；所有该拒绝的组合；`cpa show --list_exit`。monitor 的 Exit Capture Count 必须与记录数相等
+- `tests/cpa/test_stackmap_compact_ids.py`
+  - 用写普通文件的 zstd 桩编译 stack map，喂一份固定的负载（相近和相距很远的字符串 id、重复的调用栈、空帧和超长帧）：strmap 和 idsmap 必须与负载推出的结果完全一致，通过 `FOR_EACH_STACKMAP_STR` 和 `cli_stackmap_ids_copy()` 读回的每条调用栈也一致（普通编译和 ASan/UBSan 各一遍）；单独测 varint 编解码；一条调用栈 intern 或计数失败时，它的帧不会带进下一条
 - `tests/cpa/test_pagefault.py`
   - 编译存活集合 tracker 的单元测试（`tests/cpa/pagefault/tracker_harness.c`：分配、释放、移动、重置、迟到分配的重放、THP 拆分、采样哈希），并固定 `--pagefault` 的约定：入口只在一处选定、每个释放 hook 都必须挂上、5.4 以前以 e2e 期望的消息拒绝、在目标会话打开之前就开始接收输入
 - `tests/cpa/test_pagefault_e2e.py`（`tests/cpa/pagefault/`）

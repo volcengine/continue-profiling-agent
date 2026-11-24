@@ -69,6 +69,15 @@ The runtime owns the shared `cli_stackmap`, coordinates worker startup order,
 handles periodic callbacks, and performs restart flows when caches or storage
 limits require a rebuild.
 
+The stack map keeps every frame string and stack of the store directory in
+memory, so later samples dedupe against them, until the store restarts. A
+stack is one record of varints, the delta of each frame's string id to the
+previous one (about 1.5 bytes per frame), and strings and stacks live in
+append-only arenas, found through open-addressed indexes of ids and hashes.
+The stats line reports the arenas (`Ids/Str Alloc Size`), the id arrays and the
+indexes; their sum is what `--max_cache_size_mb` compares. The files of a store
+do not depend on this layout.
+
 See [src/cpa_monitor/README.md](../../src/cpa_monitor/README.md) for the worker
 breakdown.
 

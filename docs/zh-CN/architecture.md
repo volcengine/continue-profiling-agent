@@ -65,6 +65,8 @@ worker 集覆盖：
 
 runtime 统一持有共享 `cli_stackmap`，负责 worker 启动顺序、周期回调，以及在缓存或存储超限时执行 restart 流程。
 
+stack map 在内存里保留本存储目录的所有帧字符串和调用栈，直到存储重启，后来的样本都和它们去重。一条调用栈存成一条 varint 记录，每帧记录它的字符串 id 与上一帧之差（平均约 1.5 字节一帧）；字符串和调用栈放在只追加的 arena 里，通过只存 id 和哈希的开放寻址索引查找。统计行会打印 arena（`Ids/Str Alloc Size`）、id 数组和索引的大小，它们的总和就是 `--max_cache_size_mb` 比较的值。存储文件的格式与这种内存布局无关。
+
 worker 细节可参考 [src/cpa_monitor/README.md](../../src/cpa_monitor/README.md)。
 
 ### 回溯线程

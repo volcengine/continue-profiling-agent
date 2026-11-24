@@ -88,6 +88,14 @@ The default suite currently includes:
     fork, mismatches, unknowns, the 4.14 exec fallback); every refused
     combination; `cpa show --list_exit`. The monitor's Exit Capture Count must
     equal the records
+- `tests/cpa/test_stackmap_compact_ids.py`
+  - compiles the live stack map against a plain-file zstd stub and feeds it a
+    fixed workload (close and far string ids, repeated stacks, an empty and an
+    over-long frame): the strmap and idsmap must be exactly what the workload
+    implies, and every stack read back through `FOR_EACH_STACKMAP_STR` and
+    `cli_stackmap_ids_copy()` (plain and with ASan/UBSan); the varint codec on
+    its own; a stack whose interning or counting fails does not leak its
+    frames into the next one
 - `tests/cpa/test_pagefault.py`
   - compiles the live-set tracker harness (`tests/cpa/pagefault/tracker_harness.c`:
     allocations, releases, moves, resets, replay of late allocations, THP
