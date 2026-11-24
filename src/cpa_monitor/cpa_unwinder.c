@@ -19,6 +19,8 @@
 #include "cpa_pagefault.h"
 #include "uthash.h"
 
+#include <cpa_bpf/capabilities.h>
+
 #include <gunwinder/unwinder.h>
 #include <gunwinder/unwinder_types.h>
 #include <errno.h>
@@ -70,6 +72,8 @@ static const char *const stop_reason_str[] = {
 static struct gu_init_cfg gu_init_cfg = { 0 };
 static bool include_full_path = false;
 static bool disable_sym = false;
+/* --force_fp: user stacks by frame pointers only, never DWARF */
+static bool force_fp = false;
 static int queue_size = 0;
 
 struct cpa_worker unwinder_worker;
@@ -512,6 +516,17 @@ static enum cpa_worker_init_result cpa_unwinder_init(void *cli_ctx, void *worker
 	gu_init_cfg.go_not_strip_name = atoi(get_arg_by_name(cli_ctx, "strip_name_disable"));
 	include_full_path = atoi(get_arg_by_name(cli_ctx, "include_full_path"));
 	disable_sym = atoi(get_arg_by_name(cli_ctx, "disable_sym"));
+	force_fp = atoi(get_arg_by_name(cli_ctx, "force_fp")) != 0;
+	/*
+	 * The frame pointer walk reads only the chain bpf_get_stack() fills in
+	 * (Linux 4.18+): without it every user stack would end at once.
+	 */
+	if (force_fp && !strcmp(get_arg_by_name(cli_ctx, "backend"), "bpf") &&
+	    !cpa_capability_supported(cpa_capabilities_get(), CPA_CAP_GET_STACK_PERF_EVENT)) {
+		CLI_OUTPUT("--force_fp ignored: this kernel has no bpf_get_stack (Linux 4.18+), user stacks unwind "
+			   "the default way");
+		force_fp = false;
+	}
 	if (cpa_unwind_workers_parse(get_arg_by_name(cli_ctx, "unwind_workers"), cpa_unwind_workers_max(), &count)) {
 		CLI_ERROR("invalid --unwind_workers");
 		return CPA_INIT_FAILED;
@@ -1068,7 +1083,20 @@ static void cpa_unwind(struct unwind_worker *w, struct stack_sample *sample)
 		cpa_frames_marker(frames, marker);
 	}
 
-	if (backtrace_user) {
+	if (backtrace_user && force_fp) {
+		/* the frame pointer chain only: a frame without one ends the stack */
+		pthread_mutex_lock(&unwind_stat_lock);
+		unwind_stat.sample_backtrace_times_fp++;
+		unwind_stat.sample_backtrace_times++;
+		pthread_mutex_unlock(&unwind_stat_lock);
+		cpa_debug_dump_sample(sample);
+		gu_flags_set(sample->info, GU_FLAG_HINT_SET_FP);
+		gu_unwind(w->ctx, sample->info, process_single_frame_p, w);
+		backtrace_ret = gu_flags_reason(sample->info->flags);
+		if (backtrace_ret == GU_UNWIND_REASON_PROCESS_EXIT || backtrace_ret == GU_UNWIND_REASON_LANG_SKIP)
+			cpa_frames_append(frames, stop_reason_str[backtrace_ret]);
+		cpa_frames_reverse(frames);
+	} else if (backtrace_user) {
 		uint8_t unwind_regs_snapshot[CPA_UNWIND_REGS_SNAPSHOT_SIZE];
 		struct cpa_unwind_state unwind_state;
 		bool unwind_state_saved;

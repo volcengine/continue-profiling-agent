@@ -111,6 +111,7 @@ ARG_DEFINE("ring_size_mb", NO_SINGLE_NAME, "ring buffer size in MiB when datapat
 	ARG_DEFINE("pagefault", NO_SINGLE_NAME, "profile the resident anonymous memory of one process (--pid, or rules with --first_match) by allocating stack: values in bytes, one live set per second. Linux 5.4-5.18 and 6.3+. Requires the BPF backend.", false),
 	ARG_DEFINE("pf_sample_pages", NO_SINGLE_NAME, "with --pagefault: sample 1 in N 4 KiB pages (power of two, 1-512; larger pages in proportion, THP always). Default 16.", true),
 	ARG_DEFINE("max_queue_size", 'm', "maximum in-memory stack event queue length before backpressure.", true),
+	ARG_DEFINE("force_fp", NO_SINGLE_NAME, "unwind user stacks by frame pointers only, never DWARF: cheaper, but a frame without a frame pointer ends the stack. Ignored on kernels without bpf_get_stack (before 4.18).", false),
 	ARG_DEFINE("unwind_workers", NO_SINGLE_NAME, "threads that unwind user stacks, 1 to the online CPUs (at most 64); each process is unwound by one of them. Default 1.", true),
 	ARG_DEFINE("probe", NO_SINGLE_NAME, "capture stacks only when this probe fires, using bpftrace-style syntax such as 'kprobe:try_to_free_pages' or 'tracepoint:vmscan:mm_shrink_slab_start'. Requires the BPF backend.", true),
 
