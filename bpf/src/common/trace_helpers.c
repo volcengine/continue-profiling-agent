@@ -324,5 +324,8 @@ bool x86_fred_kernel(void)
 	const char *names[] = { "asm_fred_entrypoint_user" };
 	unsigned long addr;
 
+	/* FRED came in 6.9: older kernels are spared the kallsyms scan */
+	if (get_kernel_version() < KERNEL_VERSION(6, 9, 0))
+		return false;
 	return find_ksyms_addr(names, &addr, 1) == 1;
 }
