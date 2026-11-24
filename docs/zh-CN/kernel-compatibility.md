@@ -47,6 +47,14 @@ upstream fix 让 `copy_from_user_nofault()` 改用更底层的 `__access_ok()`�
 | 5.15 LTS 与 vendor kernel | 仅在 vendor 已回合修复时使用 | 原始报告涉及 5.15；需确认发行版已回合修复。 |
 | 5.10 LTS 或更老版本 | 未验证不建议使用 | 不在 CPA 当前 upstream 支持说明范围内；需先确认 vendor BPF backport 和 BTF/CO-RE 支持。 |
 
+## 用户栈拷贝
+
+on-CPU 样本会从 SP 开始把用户栈拷进事件。内核提供 `bpf_find_vma`（5.17 起，以及回合了它的发行版内核；见 `cpa capabilities` 的 `find_vma`）时，ring buffer 对象只拷到 SP 所在 VMA 的末尾：其中读不到的页填零后继续拷，栈落在 I/O 或 PFN 映射里时一字节都不读。其他情况以及 off-CPU 样本，拷贝在第一个读不到的页停止，所以中间几页从未被访问过的大栈帧会丢掉它的调用者。启动日志会写明用的是哪种拷贝（`user_stack_copy=vma_bound|unbounded`）。
+
+## Linux 6.15 到 6.17
+
+BPF 后端已跟上的内核变化：`kernfs_node::parent` 改名为 `__parent`（6.15）；`do_coredump()` 改名为 `vfs_coredump()`（6.17，`--enable_coredump_capture` 挂内核里有的那个）；`CONFIG_X86_FRED` 内核在任务栈顶留出 16 字节，用户态寄存器要往下 16 字节读；函数的 `.cold` 部分不会被选作 kprobe 目标。
+
 ## 5.3 以前的内核（例如 4.14）
 
 5.3 以前的内核不允许 BPF 程序里有循环，每个程序最多 4096 条指令；4.18 以前的内核

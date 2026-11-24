@@ -136,6 +136,29 @@ The default suite currently includes:
   - only runs on ASan builds
   - ASan end-to-end `monitor -> show` smoke for both default and perf backends
 
+- `tests/cpa/test_stack_vma.py` (`tests/cpa/stack_vma/`)
+  - a thread under a 48 KiB frame whose middle pages were never touched:
+    with the VMA-bounded copy its whole call chain is kept, without it the
+    chain is cut at the first hole
+- `tests/cpa/test_force_fp.py`
+  - `--force_fp` on a frame-pointer program: the stats count no DWARF unwind
+    and the chain is whole; without it DWARF runs
+- `tests/cpa/test_long_store_dir.py`
+  - a `--store_dir` of 300+ bytes: one day directory holds the whole run and
+    `cpa show` reads it
+- `tests/cpa/test_kernel_617_compat_static.py`
+  - pins the 6.15 - 6.17 kernel changes the BPF backend follows
+
+## Continuous Integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and on pull
+requests, on x86_64 and arm64: the build, the `cpa show` TUI tests, the unit
+and static tests (no root, no BPF), and a short root run on the runner's
+kernel (`cpa capabilities`, monitor and show, `--force_fp`, a long store
+path). The end-to-end suites above need a quiet machine with root and are
+run, with 1 and 4 unwind workers, on 5.15 x86_64 and arm64, a 4.14 VM and
+6.6 / 6.8 / 6.17 VMs before changes are pushed.
+
 ## Environment Requirements
 
 Many tests in the default suite require:

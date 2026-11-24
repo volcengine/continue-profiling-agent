@@ -32,6 +32,7 @@ sudo ./build/bin/cpa monitor \
 - `--persistent_day <days>`：仅保留最近若干天的目录
 - `--record_env_name <k1,k2>`：记录指定环境变量键，供 `cpa show` 后续过滤
 - `--parse_env_values <v1,v2>`：只对匹配环境值的进程做用户态栈解析
+- `--force_fp`：只用帧指针回溯用户栈，不走 DWARF：对带帧指针编译的代码每个样本更省，但没有帧指针的函数会让栈在那里断开或漏掉一层。内核没有 `bpf_get_stack`（4.18 以前）时忽略此选项并打印说明
 - `--bench`：在运行状态里按 stat 周期打印最终 DWARF 路径 benchmark，包括实际回溯次数、速率、平均/最小/最大耗时和固定耗时桶。`FP_BETTER` 样本不计入。首次符号/CFI 冷加载可能体现在前几个周期。
 
 一次性采样：

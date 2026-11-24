@@ -48,6 +48,26 @@ References:
 | 5.15 LTS and vendor kernels | Vendor-patched only | The original report involved 5.15; use only when your vendor confirms the fix is backported. |
 | 5.10 LTS or older | Not recommended without validation | Outside CPA's documented upstream support window; check vendor BPF backports and BTF/CO-RE support first. |
 
+## User Stack Copy
+
+On-CPU samples copy the user stack from SP into the event. Where the kernel
+offers `bpf_find_vma` (5.17, and vendor kernels that backported it; see
+`cpa capabilities`, `find_vma`), the ring-buffer object copies up to the end
+of the VMA holding SP only: a page inside it that cannot be read is
+zero-filled and the copy goes on, and a stack in an I/O or PFN mapping is not
+read at all. Elsewhere, and for off-CPU samples, the copy stops at the first
+page that cannot be read, so a large frame whose middle pages were never
+touched can lose its callers. The start line says which copy runs
+(`user_stack_copy=vma_bound|unbounded`).
+
+## Linux 6.15 to 6.17
+
+Followed by the BPF backend: `kernfs_node::parent` became `__parent` (6.15),
+`do_coredump()` became `vfs_coredump()` (6.17; `--enable_coredump_capture`
+attaches whichever the kernel has), `CONFIG_X86_FRED` kernels keep 16 bytes
+free at the top of the task stack (the user registers are read 16 bytes
+lower), and `.cold` parts of functions are never chosen as kprobe targets.
+
 ## Kernels Before 5.3 (for example 4.14)
 
 Kernels before 5.3 accept no loops and at most 4096 instructions per BPF

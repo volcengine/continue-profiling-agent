@@ -101,6 +101,19 @@ pytest -q tests/cpa
   - 仅在 ASan 构建下执行
   - `monitor -> show` 的 ASan 全流程 smoke，覆盖 default / perf backend
 
+- `tests/cpa/test_stack_vma.py`（`tests/cpa/stack_vma/`）
+  - 一个线程运行在 48 KiB、中间几页从未被访问过的栈帧下：用按 VMA 限界的拷贝时整条调用链完整，不用时在第一个空洞处断开
+- `tests/cpa/test_force_fp.py`
+  - 对带帧指针的程序用 `--force_fp`：统计里没有 DWARF 回溯且调用链完整；不加时走 DWARF
+- `tests/cpa/test_long_store_dir.py`
+  - 300 字节以上的 `--store_dir`：整个运行都在一个日目录里，`cpa show` 能读出
+- `tests/cpa/test_kernel_617_compat_static.py`
+  - 固定 BPF 后端跟上的 6.15 - 6.17 内核变化
+
+## 持续集成
+
+`.github/workflows/ci.yml` 在每次推送到 `main` 和每个 pull request 时运行，x86_64 和 arm64 各一份：构建、`cpa show` TUI 测试、单元和静态测试（不需要 root 和 BPF），以及在 runner 内核上以 root 跑一小段（`cpa capabilities`、monitor 与 show、`--force_fp`、长存储路径）。上面的端到端测试需要安静的机器和 root，推送前在 5.15 x86_64 和 arm64、4.14 虚拟机以及 6.6 / 6.8 / 6.17 虚拟机上用 1 个和 4 个回溯线程各跑一遍。
+
 ## 环境要求
 
 默认测试集中的很多用例依赖：

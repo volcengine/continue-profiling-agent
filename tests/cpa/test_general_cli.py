@@ -51,7 +51,7 @@ def test_subcommand_help_flag():
     assert "--bench" in stdout
     assert "--debug_cache_path" not in stdout
     assert "--background" not in stdout
-    assert "--force_fp" not in stdout
+    assert "--force_fp" in stdout
     assert "--no_backtrace_lang" not in stdout
     # descriptions wrap at the terminal width: compare words, not lines
     words = " ".join(stdout.lower().split())

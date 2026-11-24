@@ -35,6 +35,10 @@ Useful options:
   filtering in `cpa show`
 - `--parse_env_values <v1,v2>`: only unwind user stacks for matching
   environment values
+- `--force_fp`: unwind user stacks by frame pointers only, never DWARF:
+  cheaper per sample for code built with frame pointers, but a frame without
+  one ends or skips the stack. Ignored, saying so, on kernels without
+  `bpf_get_stack` (before 4.18)
 - `--bench`: print per-stat-interval final-DWARF-path benchmark statistics,
   including actual unwind count, rate, average/min/max latency, and fixed
   latency buckets. `FP_BETTER` samples are excluded. Initial symbol/CFI cold

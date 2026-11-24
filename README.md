@@ -285,6 +285,7 @@ Shared generic options:
 - `--record_env_name, -R <LIST>`: record these env keys into metadata so `cpa show` can filter on them.
 - `--parse_env_values, -V <LIST>`: only unwind user stacks for processes whose recorded env values match this list.
 - `--max_queue_size, -m <N>`: maximum in-memory stack event queue length before backpressure.
+- `--force_fp`: unwind user stacks by frame pointers only, never DWARF (ignored before 4.18).
 - `--unwind_workers <N>`: threads that unwind user stacks, 1 to the online CPUs (at most 64), default 1. Each process is unwound by one of them; memory grows with N (see docs/en/architecture.md).
 - `--stack_size <BYTES>`: BPF backend user-stack capture buffer size. Must be 4K-aligned and within `[4096, 65536]`. The perf backend does not support custom stack-size semantics.
 - `--max_cache_size_mb <MB>`: restart monitor when symbol/debug cache usage exceeds this limit.
