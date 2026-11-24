@@ -381,7 +381,7 @@ A state is `supported`, `unsupported` (the kernel lacks it), `unavailable`
   `tracepoint_program_load`: the program types timer sampling, `--offcpu` /
   `--probe kprobe:...` and `--probe tracepoint:...` load;
 - `process_exit`: the exit tracepoint program every run attaches;
-- `coredump`: the `do_coredump` kprobe of `--enable_coredump_capture`;
+- `coredump`: the `do_coredump` kprobe (`vfs_coredump` on 6.17+) of `--enable_coredump_capture`;
 - `ringbuf`: the ring-buffer datapath (`--datapath auto` uses it when present);
 - `pagefault`: a kernel entry for `--pagefault`'s new anonymous pages (5.4 -
   5.18, or 6.3+ with BTF; refused otherwise).

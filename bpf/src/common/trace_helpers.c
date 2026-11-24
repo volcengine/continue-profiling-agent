@@ -299,7 +299,13 @@ char *find_kprobe_functions(const char *func)
 			goto out;
 		}
 
-		if (!result && strncmp(symbol, prefix, strlen(prefix)) == 0) {
+		/*
+		 * A .cold part is code split off the function body, not its
+		 * entry, and cannot be kprobed (6.17 lists
+		 * finish_task_switch.isra.0.cold ahead of .isra.0).
+		 */
+		if (!result && strncmp(symbol, prefix, strlen(prefix)) == 0 &&
+		    !strstr(symbol + strlen(prefix) - 1, ".cold")) {
 			result = strdup(symbol);
 		}
 	}
@@ -311,4 +317,12 @@ out:
 		free(line);
 
 	return result;
+}
+
+bool x86_fred_kernel(void)
+{
+	const char *names[] = { "asm_fred_entrypoint_user" };
+	unsigned long addr;
+
+	return find_ksyms_addr(names, &addr, 1) == 1;
 }

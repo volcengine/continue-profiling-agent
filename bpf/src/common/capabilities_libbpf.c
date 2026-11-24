@@ -22,14 +22,17 @@ static int probe_program_type(enum bpf_prog_type type)
 	return libbpf_probe_bpf_prog_type(type, NULL);
 }
 
-/* The kprobe on do_coredump that --enable_coredump_capture attaches. */
+/*
+ * The kprobe --enable_coredump_capture attaches: do_coredump, vfs_coredump
+ * since Linux 6.17.
+ */
 static int probe_coredump(void)
 {
 	int ret = probe_program_type(BPF_PROG_TYPE_KPROBE);
 
 	if (ret != 1)
 		return ret;
-	return kprobe_exists("do_coredump") ? 1 : 0;
+	return kprobe_exists("vfs_coredump") || kprobe_exists("do_coredump") ? 1 : 0;
 }
 
 /*

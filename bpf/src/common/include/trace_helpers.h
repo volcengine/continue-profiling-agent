@@ -45,6 +45,14 @@ unsigned long get_task_size_max(void);
 
 char *find_kprobe_functions(const char *func);
 
+/*
+ * Whether the kernel is built with CONFIG_X86_FRED (6.9+, e.g. Ubuntu 6.17):
+ * there TOP_OF_KERNEL_STACK_PADDING is 16, so the user pt_regs sit 16 bytes
+ * below the top of the task stack.  Read from kallsyms, which every host
+ * has, not /boot/config.
+ */
+bool x86_fred_kernel(void);
+
 /**
  * find_ksyms_addr - find addresses of exact kernel symbols
  * @names: array of symbol names to match (full token match)

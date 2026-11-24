@@ -209,6 +209,9 @@ static int setup_offcpu_capture_config(struct offcpu_capture_config *config, int
 		config->stack_offset = min_thread_size;
 #elif defined(__CPA_BPF_ARCH_x86)
 	config->stack_offset = config->page_size << (kernel_config_enabled("CONFIG_KASAN") ? 3 : 2);
+	/* CONFIG_X86_FRED keeps 16 bytes free at the top of the task stack */
+	if (x86_fred_kernel())
+		config->stack_offset -= 16;
 #endif
 	/*
 	 * Keep stack address math identical to on-CPU capture: stack_offset

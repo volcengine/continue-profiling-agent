@@ -316,7 +316,7 @@ state 取值：`supported`、`unsupported`（内核没有）、`unavailable`（�
 - `perf_event_program_load`、`kprobe_program_load`、`tracepoint_program_load`：
   定时采样、`--offcpu` / `--probe kprobe:...`、`--probe tracepoint:...` 加载的程序类型；
 - `process_exit`：每次运行都会挂的进程退出 tracepoint 程序；
-- `coredump`：`--enable_coredump_capture` 用的 `do_coredump` kprobe；
+- `coredump`：`--enable_coredump_capture` 用的 `do_coredump` kprobe（6.17 起是 `vfs_coredump`）；
 - `ringbuf`：ring buffer 数据通路（`--datapath auto` 在有时使用）；
 - `pagefault`：`--pagefault` 获知新匿名页的内核入口（5.4 - 5.18，或带 BTF 的
   6.3+；其他内核拒绝）。

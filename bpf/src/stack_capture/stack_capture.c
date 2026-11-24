@@ -572,6 +572,9 @@ static int setup_stack_capture_config(struct stack_capture_config *config, uint6
 		config->stack_offset = min_thread_size;
 #elif defined(__CPA_BPF_ARCH_x86)
 	config->stack_offset = config->page_size << (kernel_config_enabled("CONFIG_KASAN") ? 3 : 2);
+	/* CONFIG_X86_FRED keeps 16 bytes free at the top of the task stack */
+	if (x86_fred_kernel())
+		config->stack_offset -= 16;
 #endif
 
 	/*
@@ -1014,10 +1017,12 @@ config.only_kernel = user_ctx->only_kernel;
 	}
 
 	if (coredump_capture_enabled) {
-		coredump_link = bpf_program__attach_kprobe(
-			sc_prog("stack_capture_coredump"), false, "do_coredump");
+		/* Linux 6.17 renamed do_coredump() to vfs_coredump(), same arguments */
+		const char *sym = kprobe_exists("vfs_coredump") ? "vfs_coredump" : "do_coredump";
+
+		coredump_link = bpf_program__attach_kprobe(sc_prog("stack_capture_coredump"), false, sym);
 		if (!coredump_link) {
-			BPF_ERR("failed to attach kprobe/do_coredump errno=%d\n", errno);
+			BPF_ERR("failed to attach kprobe/%s errno=%d\n", sym, errno);
 			err = -errno;
 			if (!err)
 				err = -EIO;
