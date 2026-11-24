@@ -8,7 +8,7 @@
 #include <stdbool.h>
 
 #ifndef CLI_VERSION
-#define CLI_VERSION "1.1.1"
+#define CLI_VERSION "1.2.0"
 #endif
 
 /**
