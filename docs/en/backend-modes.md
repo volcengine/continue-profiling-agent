@@ -58,12 +58,20 @@ The current capture path uses:
 
 ### BPF Helpers
 
-The preflight explicitly checks the helpers currently used by CPA:
+The preflight checks the helpers the capture objects use, each with the older
+helper it can fall back to:
 
-- `bpf_get_stack`
+- `bpf_get_stack`, or `bpf_get_stackid` (before 4.18)
 - `bpf_perf_event_output`
-- `bpf_probe_read_user`
-- `bpf_probe_read_kernel`
+- `bpf_probe_read_user` / `bpf_probe_read_kernel`, or `bpf_probe_read`
+  (before 5.5)
+
+Which capture object is loaded then follows from what the kernel has: the
+ring-buffer object where `BPF_MAP_TYPE_RINGBUF` exists (with the user stack
+copy bounded by its VMA where `bpf_find_vma` exists), the perf-buffer object
+otherwise, and the lite objects on kernels without `bpf_get_stack`. The start
+line names the one chosen; `cpa capabilities` prints the facts behind it. See
+[kernel-compatibility.md](kernel-compatibility.md).
 
 ### Attach Targets
 
@@ -91,9 +99,12 @@ The current rejected combinations include:
 - `--oneshot`
 - `--offcpu`
 - `--probe`
-- `--pid`
-- `--comm`
+- `--pagefault`
 - `--kernel_stack`
+- any process selection: `--pid`, `--comm`, `--thread_comm`, `--exe`,
+  `--cgroup`, `--container_pid`, `--children`, `--new_only`, `--first_match`,
+  `--startup_window`
+- exit capture: `--enable_exit_capture`, `--exit_*`
 - non-default `--stack_size`
 
 The rule is intentional: unsupported options should not silently become no-ops.
@@ -117,13 +128,7 @@ Not every BPF failure is allowed to fall back to perf.
 Only plain continuous on-CPU profiling can fall back. In practice that means:
 
 - `backend=bpf`
-- no `--oneshot`
-- no `--offcpu`
-- no `--probe`
-- no `--pid`
-- no `--comm`
-- no `--kernel_stack`
-- no non-default `--stack_size`
+- none of the options listed below as not eligible
 
 When this request fails the BPF preflight, CPA will:
 
@@ -139,9 +144,12 @@ CPA hard-fails when BPF is unavailable for any of these modes:
 - `--oneshot`
 - `--offcpu`
 - `--probe`
-- `--pid`
-- `--comm`
+- `--pagefault`
 - `--kernel_stack`
+- any process selection: `--pid`, `--comm`, `--thread_comm`, `--exe`,
+  `--cgroup`, `--container_pid`, `--children`, `--new_only`, `--first_match`,
+  `--startup_window`
+- exit capture: `--enable_exit_capture`, `--exit_*`
 - non-default `--stack_size`
 
 The reason is straightforward: these features are either BPF-only or not

@@ -53,12 +53,13 @@ BPF 路径会用到：
 
 ### BPF helper
 
-当前会显式依赖：
+预检会检查采集对象用到的 helper，每个都可以退到更老的那个：
 
-- `bpf_get_stack`
+- `bpf_get_stack`，或 `bpf_get_stackid`（4.18 以前）
 - `bpf_perf_event_output`
-- `bpf_probe_read_user`
-- `bpf_probe_read_kernel`
+- `bpf_probe_read_user` / `bpf_probe_read_kernel`，或 `bpf_probe_read`（5.5 以前）
+
+加载哪个采集对象由内核能力决定：有 `BPF_MAP_TYPE_RINGBUF` 时用 ring buffer 对象（有 `bpf_find_vma` 时用户栈拷贝限制在所在 VMA 内），否则用 perf buffer 对象，没有 `bpf_get_stack` 的内核用 lite 对象。启动日志会写明用的是哪一个，`cpa capabilities` 打印背后的各项能力。见 [kernel-compatibility.md](kernel-compatibility.md)。
 
 ### 具体 attach 点
 
@@ -81,9 +82,10 @@ BPF 路径会用到：
 - `--oneshot`
 - `--offcpu`
 - `--probe`
-- `--pid`
-- `--comm`
+- `--pagefault`
 - `--kernel_stack`
+- 任何进程选择：`--pid`、`--comm`、`--thread_comm`、`--exe`、`--cgroup`、`--container_pid`、`--children`、`--new_only`、`--first_match`、`--startup_window`
+- 退出栈采集：`--enable_exit_capture`、`--exit_*`
 - 非默认 `--stack_size`
 
 报错原则是：不要让不生效的参数静默混进 perf 路径。
@@ -107,13 +109,7 @@ CPA 会检查：
 只有“纯 on-CPU 持续采样”这一类请求可以回退。也就是：
 
 - `backend=bpf`
-- 没开 `--oneshot`
-- 没开 `--offcpu`
-- 没开 `--probe`
-- 没设置 `--pid`
-- 没设置 `--comm`
-- 没开 `--kernel_stack`
-- 没把 `--stack_size` 改成非默认值
+- 没有用到下面「不允许回退」列出的任何选项
 
 如果这时 BPF 不满足，CPA 会：
 
@@ -129,9 +125,10 @@ CPA 会检查：
 - `--oneshot`
 - `--offcpu`
 - `--probe`
-- `--pid`
-- `--comm`
+- `--pagefault`
 - `--kernel_stack`
+- 任何进程选择：`--pid`、`--comm`、`--thread_comm`、`--exe`、`--cgroup`、`--container_pid`、`--children`、`--new_only`、`--first_match`、`--startup_window`
+- 退出栈采集：`--enable_exit_capture`、`--exit_*`
 - 非默认 `--stack_size`
 
 原因很直接：这些能力要么完全是 BPF 专属，要么 perf 路径不能等价保留语义。

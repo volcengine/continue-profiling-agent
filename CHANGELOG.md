@@ -18,8 +18,9 @@
   unwinds with frame pointers only.
 - `cpa capabilities` prints what the running kernel supports.
 - Runs on 4.14 kernels and on 6.17.
-- The stack map needs about a third of the memory it used to; store files
-  are unchanged.
+- The in-memory stack map is much smaller: with 400k distinct stacks it
+  went from 389 MB to 128 MB, and peak RSS from 475 MB to 226 MB. Store
+  files are unchanged.
 - arm64: samples in a leaf function no longer lose its caller. On 5.17+
   a large stack frame with untouched pages keeps its callers too.
 - Bundles libgunwinder v2.0.0.

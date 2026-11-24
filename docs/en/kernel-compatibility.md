@@ -46,7 +46,11 @@ References:
 | Upstream 6.3.x | Do not use | Last affected upstream line before 6.4. |
 | Upstream 6.4+ | Supported baseline | The upstream fix is in the 6.4 development cycle. |
 | 5.15 LTS and vendor kernels | Vendor-patched only | The original report involved 5.15; use only when your vendor confirms the fix is backported. |
-| 5.10 LTS or older | Not recommended without validation | Outside CPA's documented upstream support window; check vendor BPF backports and BTF/CO-RE support first. |
+| 5.10 LTS or older | Validate first | Check vendor BPF backports and BTF/CO-RE support; 4.14 runs with the lite objects described below. |
+
+Tested for this release: 4.14.81, 5.15 (x86_64 and arm64), 6.6.95, 6.8.0 and
+6.17.0, with on-CPU, off-CPU, process selection, exit capture and
+`--pagefault` (refused before 5.4).
 
 ## User Stack Copy
 

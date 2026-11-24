@@ -45,7 +45,9 @@ upstream fix 让 `copy_from_user_nofault()` 改用更底层的 `__access_ok()`�
 | Upstream 6.3.x | 不要使用 | 6.4 之前最后一个受影响 upstream 版本线。 |
 | Upstream 6.4+ | 支持基线 | upstream fix 进入 6.4 开发周期。 |
 | 5.15 LTS 与 vendor kernel | 仅在 vendor 已回合修复时使用 | 原始报告涉及 5.15；需确认发行版已回合修复。 |
-| 5.10 LTS 或更老版本 | 未验证不建议使用 | 不在 CPA 当前 upstream 支持说明范围内；需先确认 vendor BPF backport 和 BTF/CO-RE 支持。 |
+| 5.10 LTS 或更老版本 | 先验证再用 | 需确认 vendor BPF backport 和 BTF/CO-RE 支持；4.14 使用下文所述的 lite 对象运行。 |
+
+本版本测试过的内核：4.14.81、5.15（x86_64 和 arm64）、6.6.95、6.8.0、6.17.0，覆盖 on-CPU、off-CPU、进程选择、退出栈采集和 `--pagefault`（5.4 以前拒绝启动）。
 
 ## 用户栈拷贝
 
