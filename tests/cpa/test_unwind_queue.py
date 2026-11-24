@@ -33,6 +33,8 @@ def test_unwind_queue(tmp_path: Path, sanitize: str) -> None:
            "-I", str(tmp_path), "-I", str(mon), "-I", str(ROOT / "src"),
            *[arg for d in sorted((ROOT / "src").iterdir()) if d.is_dir()
              for arg in ("-I", str(d))],
+           # libbpf's headers as the build installs them: no system libbpf needed
+           "-I", str(ROOT / "build" / "libs" / "libbpf" / "include"),
            "-I", str(ROOT / "bpf" / "src" / "common" / "include"),
            "-I", str(ROOT / "bpf" / "include"), "-I", str(gu),
            "-I", str(gu / "gunwinder"), "-I", str(gu / "arch" / arch_dir)]
