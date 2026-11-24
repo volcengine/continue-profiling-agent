@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 ByteDance
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      CPA_BPF_LLVM_VERSION: "18"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake binutils-dev build-essential clang-18 cmake curl git \
+            libdw-dev libelf-dev libiberty-dev libssl-dev libtool libzstd-dev llvm-18 \
+            make pkg-config python3 python3-pytest zlib1g-dev zstd
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCPA_BPF_LLVM_VERSION=${CPA_BPF_LLVM_VERSION}
+          cmake --build build -j"$(nproc)"
+
+      - name: cpa show TUI tests
+        run: cd src/cpa_show/rust && cargo test --release
+
+      # Unit and static tests: they compile parts of the tree against stubs
+      # and need no root and no BPF.
+      - name: Unit tests
+        run: |
+          python3 -m pytest -q -rs -p no:cacheprovider \
+            tests/cpa/test_capabilities.py \
+            tests/cpa/test_capture_static_guards.py \
+            tests/cpa/test_cpa_bpf_capture_lifecycle_static.py \
+            tests/cpa/test_cpa_runtime_lifecycle_static.py \
+            tests/cpa/test_cpa_show_record_selection_static.py \
+            tests/cpa/test_cpa_utils_selection.py \
+            tests/cpa/test_exit_env.py \
+            tests/cpa/test_exit_target_parse.py \
+            tests/cpa/test_feature_guard_coredump_ringbuf_static.py \
+            tests/cpa/test_kernel_617_compat_static.py \
+            tests/cpa/test_pagefault.py \
+            tests/cpa/test_stack_sample_builder.py \
+            tests/cpa/test_stackmap_compact_ids.py \
+            tests/cpa/test_stackmap_empty_records.py \
+            tests/cpa/test_stackmap_frame_cap.py \
+            tests/cpa/test_stackmap_guard_records_reader.py \
+            tests/cpa/test_stackmap_timewheel.py \
+            tests/cpa/test_target_parse.py \
+            tests/cpa/test_unwind_queue.py \
+            tests/cpa/test_unwinder_reg_restore_static.py \
+            tests/cpa/test_zstd_long_paths.py
+
+      # A short run on the runner's kernel, as root: the BPF objects load,
+      # samples are stored and read back.  The long end-to-end suites
+      # (exit capture, page faults, process selection, unwind workers) need
+      # quiet machines and run before every push instead (docs/en/testing.md).
+      - name: BPF smoke test
+        run: |
+          uname -r
+          sudo build/bin/cpa capabilities
+          sudo -E env PATH="$PATH" python3 -m pytest -q -rs -p no:cacheprovider \
+            tests/cpa/test_monitor_show.py \
+            tests/cpa/test_force_fp.py \
+            tests/cpa/test_long_store_dir.py
